@@ -49,19 +49,26 @@ MIMII Dataset 由 Hitachi, Ltd. 以 **CC BY-SA 4.0** 发布，引用与许可全
 
 ## 快速开始（Windows）
 
+> 仓库**不含** `.venv`（虚拟环境约 500 MB，已被 `.gitignore` 排除），克隆后先建环境，否则 `.venv\Scripts\...` 会报「系统找不到指定的路径」。
+
 ```bash
+git clone https://github.com/xiao-o-o/haigong-om-app.git
 cd haigong-om-app
-.venv\Scripts\streamlit run app.py
-```
-
-已随包提供 `.venv`（Python 3.13 + 全部依赖）。若环境损坏，重建：
-
-```bash
 python -m venv .venv
 .venv\Scripts\pip install -r requirements.txt
 ```
 
+依赖装好后启动，**不需要任何密钥**（未配置 LLM 时自动走规则版决策器）：
+
+```bash
+.venv\Scripts\streamlit run app.py
+```
+
 浏览器打开 http://localhost:8501 。macOS / Linux 把 `.venv\Scripts` 换成 `.venv/bin`。
+
+要求 Python **3.11+**（`core/llm.py` 用标准库 `tomllib` 读配置）；全部测试结论出自 3.13.14。
+
+`models/pump_v1.joblib` 是 sklearn 序列化对象，**必须与训练时的 sklearn 版本同代**（`requirements.txt` 已锁 `scikit-learn>=1.9,<2`），版本不符会在 real 模式报反序列化错误——那不是代码问题，重新导出模型即可。
 
 接真实 LLM 前先跑自检（四步全通过再开页面）：
 
@@ -181,8 +188,9 @@ runs/                   运行时产物：上传暂存、频谱图、路线图�
 
 ```toml
 LLM_BASE_URL = "https://api.deepseek.com/v1"   # 必须带版本段，代码只在其后拼 /chat/completions
-LLM_MODEL    = "deepseek-chat"
+LLM_MODEL    = "deepseek-v4-flash"             # deepseek-chat 已于 2026-07-24 停用，写它必 404
 LLM_TIMEOUT  = 30
+LLM_THINKING = "auto"                          # 对 deepseek/qwen 自动关闭思考模式
 LLM_API_KEY  = "sk-..."                        # 填真值；不要留空串占位
 ```
 
@@ -245,9 +253,10 @@ LLM_API_KEY  = "sk-..."                        # 填真值；不要留空串占�
 | APP_MODE | mock | mock=模拟检测数据；real=调 A 的真实模型 |
 | LLM_BASE_URL | 空 | OpenAI 兼容接口地址，需带版本段，如 `https://api.deepseek.com/v1` |
 | LLM_API_KEY | 空 | 密钥；也可写在 `.streamlit/secrets.toml` |
-| LLM_MODEL | 空 | 模型名，如 `deepseek-chat` |
+| LLM_MODEL | 空 | 模型名，如 `deepseek-v4-flash`（`deepseek-chat` 已停用） |
 | LLM_TIMEOUT | 30 | 读取超时（秒）；超时即回退规则版 |
 | LLM_TEMPERATURE | 0 | 决策任务建议 0 |
+| LLM_THINKING | auto | `auto`/`1`/`0`，控制是否关闭模型的思考模式；DeepSeek V4 默认思考且思考 token 计费，`auto` 会自动关闭 |
 
 三项 LLM 变量缺任意一项 → 视为未配置，自动走规则版。
 `APP_MODE` 只影响默认值，页面侧边栏的「运行模式」以页面选择为准。

@@ -1,6 +1,9 @@
 # 发布到 GitHub（公开仓库）操作步骤
 
-面向本项目当前状态编写（v0.6，49 个文件已暂存，尚未提交）。
+面向本项目当前状态编写（v0.6）。
+
+> 本文所有路径写成 `<本机仓库目录>` 或 `%USERPROFILE%` 一类占位，  
+> 照做时换成你自己的实际路径即可。
 
 ---
 
@@ -9,20 +12,24 @@
 > 这一节专门解决「命令敲在哪」。**先读完再动手**，否则后面每条都会报  
 > `git: command not found`。
 
-### 1. 你已经装了 Git 2.56，不用再装
+### 1. 先确认 Git 装没装
 
-实测位置：`D:\Users\yxh\AppData\Local\Git\`（装在用户目录，不在 `Program Files`，  
-所以只看 Program Files 会误判成「没装」）。
+很多机器的 Git 不在 `C:\Program Files`，而是装在用户目录（如  
+`%LOCALAPPDATA%\Programs\Git` 或 `%LOCALAPPDATA%\Git`），  
+所以只看 `Program Files` 会误判成「没装」。找 `git-bash.exe` 最可靠：
 
-| 项目     | 值                                             |
-| ------ | --------------------------------------------- |
-| 版本     | `git version 2.56.0.windows.3`                |
-| 终端启动器  | `D:\Users\yxh\AppData\Local\Git\git-bash.exe` |
-| git 本体 | 同目录 `cmd\git.exe`                             |
+```powershell
+Get-ChildItem -Path $env:USERPROFILE -Filter git-bash.exe -Recurse -ErrorAction SilentlyContinue
+```
 
-窗口标题显示 `UCRT64:/c/Users/yxh` 的那种黑窗口，就是这个 Git 的 Bash  
-（2.56 使用 UCRT64 运行环境，不再是老版本显示的 `MINGW64`）。  
-在这个环境里 `git --version` 能正常输出，**直接可用**。
+| 项目     | 怎么确认                                     |
+| ------ | ---------------------------------------- |
+| 版本     | `git --version`（注意 `git` 与 `--version` 之间有空格） |
+| 终端启动器  | 开始菜单搜 `Git Bash`，找不到就双击上一步搜到的 `git-bash.exe` |
+| git 本体 | 与 `git-bash.exe` 同级的 `cmd\git.exe`        |
+
+较新的 Git for Windows 使用 **UCRT64** 运行环境，提示符显示 `UCRT64` 而不是老版本的  
+`MINGW64`，两者都能用，不影响后续步骤。
 
 ### 2. 高频输入错误：命令之间必须有空格
 
@@ -59,7 +66,7 @@ git --version
 **方式 A：从文件夹右键（推荐）**
 
 1. 打开文件资源管理器，地址栏粘贴并回车：  
-   `C:\Users\yxh\WorkBuddy\2026-10-20-10-37-15\haigong-om-app`
+   `<本机仓库目录>`（例如 `C:\Users\<你的用户名>\haigong-om-app`）
 2. 在文件夹空白处**右键**
 3. Windows 11 上先点 **「显示更多选项」**（`Shift+F10` 也可以直接出完整菜单）
 4. 点 **`Open Git Bash here`**（部分版本显示为 `Git Bash Here`）
@@ -71,14 +78,13 @@ git --version
 开始菜单搜 `Git Bash` → 打开 → 粘贴这一行（注意 Git Bash 里路径写成 `/c/...`）：
 
 ```bash
-cd /c/Users/yxh/WorkBuddy/2026-10-20-10-37-15/haigong-om-app
+cd /path/to/haigong-om-app
 ```
 
-开始菜单里找不到的话，直接双击这个文件，效果一样：
+（Windows 上形如 `/c/Users/<你的用户名>/haigong-om-app`；与资源管理器里的  
+`C:\Users\<你的用户名>\haigong-om-app` 是同一个目录，只是盘符写法不同。）
 
-```
-D:\Users\yxh\AppData\Local\Git\git-bash.exe
-```
+开始菜单里找不到的话，直接双击上一步搜到的 `git-bash.exe`，效果一样。
 
 **方式 C：cmd 或 PowerShell**
 
@@ -119,7 +125,7 @@ Git 的惯例是**成功时保持沉默**，不输出反而是好事。
 1. 下载安装 <https://desktop.github.com>
 2. 打开 → `Sign in to GitHub.com` → 浏览器授权
 3. 菜单 `File` → `Add local repository...` → 选  
-   `C:\Users\yxh\WorkBuddy\2026-10-20-10-37-15\haigong-om-app`
+   `<本机仓库目录>`
 4. 它会识别到已有仓库并列出 49 个待提交文件，左下角填一句提交说明 → 点  
    `Commit to main`
 5. 顶部出现 `Publish repository` → 点开 → **取消勾选 `Keep this code private`**  
@@ -196,7 +202,7 @@ git config --global user.email "294380548+xiao-o-o@users.noreply.github.com"
 
 ## 三、首次提交
 
-**已完成**，提交号 `f6ed147`，51 个文件入库。
+**已完成**，提交号 `f6ed147`，49 个文件入库。
 
 ```bash
 git commit -m "初始提交：海工智维多设备声学运维原型"   # 已执行
