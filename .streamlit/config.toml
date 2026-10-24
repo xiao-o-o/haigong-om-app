@@ -1,0 +1,18 @@
+[server]
+# 部署时端口由平台注入的 PORT 环境变量决定，配置里不写死；本地默认走 8501
+headless = true
+address = "0.0.0.0"
+# 反向代理部署：同源转发，关闭 CORS/XSRF 校验，避免 WebSocket 握手被拒
+enableCORS = false
+enableXsrfProtection = false
+fileWatcherType = "none"
+
+[browser]
+gatherUsageStats = false
+
+[theme]
+base = "light"
+primaryColor = "#1F4E79"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F0F4F8"
+textColor = "#1A1A1A"

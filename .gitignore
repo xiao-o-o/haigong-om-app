@@ -1,0 +1,23 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+.streamlit/secrets.toml
+*.log
+.DS_Store
+
+# 运行时产物：检测频谱图、规划路线图、上传暂存，不入库
+runs/
+
+# 密钥：任何层级的 secrets.toml 都不入库（模板 .example 入）
+**/secrets.toml
+*.pem
+*.key
+
+# 系统与编辑器杂项
+Thumbs.db
+desktop.ini
+.ipynb_checkpoints/
+.vscode/
+.idea/

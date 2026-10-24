@@ -1,0 +1,7 @@
+﻿asset_id,node_id,criticality,name,simulation
+P01,N01,3,模拟水泵01,true
+P02,N02,2,模拟水泵02,true
+P03,N03,3,模拟水泵03,true
+P04,N04,1,模拟水泵04,true
+P05,N05,2,模拟水泵05,true
+P06,N06,1,模拟水泵06,true

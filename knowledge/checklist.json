@@ -1,0 +1,42 @@
+[
+  {
+    "source_id": "K-001",
+    "title": "MIMII 工业设备声音数据集（水泵/风机/阀门/滑轨）",
+    "url": "https://zenodo.org/records/3678171",
+    "kind": "public",
+    "conditions": "适用于说明本系统水泵模型的训练数据来源与工况边界；仅覆盖 MIMII 采集的机型与录音条件。",
+    "advice": "报告引用分数时须注明模型来自 MIMII 数据训练，不保证迁移到其他型号或安装方式的水泵；换机型应重新采集正常样本评估。"
+  },
+  {
+    "source_id": "K-002",
+    "title": "DCASE 2020 Task 2 机器无监督异常声音检测",
+    "url": "https://dcase.community/challenge2020/task-unsupervised-anomalous-sound-detection-in-machines",
+    "kind": "public",
+    "conditions": "适用于解释无监督异常检测的评测口径（AUC / pAUC）与「仅用正常样本训练」的前提。",
+    "advice": "AUC 衡量排序能力，不是单台设备的故障概率；不得把模型分数直接换算成「有 X% 概率损坏」。"
+  },
+  {
+    "source_id": "K-003",
+    "title": "巡检记录填写规范（团队设定）",
+    "url": "",
+    "kind": "team",
+    "conditions": "适用于任何进入报告或交接单的检测结论，模拟模式与真实模型模式都适用。",
+    "advice": "每条记录须带 run_id、音频文件名、模型版本、阈值与判定状态；模拟数据必须标注「模拟」，不得写入正式巡检结论。"
+  },
+  {
+    "source_id": "K-004",
+    "title": "疑似异常复核流程（团队设定）",
+    "url": "",
+    "kind": "team",
+    "conditions": "适用于 status = suspected_anomaly 的设备，或分数接近阈值、录音质量不合格的情况。",
+    "advice": "先人工复听并复测一次，再判断是否安排检修；系统只提示「相对异常程度」，不断言具体损坏部件，最终结论由人工复核给出。"
+  },
+  {
+    "source_id": "K-005",
+    "title": "音频输入质量要求（团队设定）",
+    "url": "",
+    "kind": "team",
+    "conditions": "适用于送检前的音频自检：16 kHz 单声道 WAV、时长 ≥ 1 秒、非全零、非空文件。",
+    "advice": "采样率不符或时长不足会返回 invalid_input，不得把 invalid_input 当作 normal；应重新采集后再送检。"
+  }
+]

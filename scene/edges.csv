@@ -1,0 +1,14 @@
+﻿edge_id,from_node,to_node,length_m,enabled
+E01,S,J01,20,true
+E02,J01,J02,20,true
+E03,S,J03,20,true
+E04,J01,J04,20,true
+E05,J02,J05,20,true
+E06,J03,J04,20,true
+E07,J04,J05,20,true
+E08,J03,N01,10,true
+E09,J04,N02,10,true
+E10,J05,N03,10,true
+E11,S,N04,10,true
+E12,J01,N05,10,true
+E13,J02,N06,10,true

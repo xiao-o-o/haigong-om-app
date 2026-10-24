@@ -1,0 +1,48 @@
+{
+  "trained_at": "2026-10-21T15:50:39+08:00",
+  "seed": 42,
+  "if_n_estimators": 200,
+  "knn_k": 5,
+  "threshold_percentile": 95,
+  "thresholds": {
+    "iforest": 0.5455362505120236,
+    "knn": 14.405998518585829
+  },
+  "primary_method": "iforest",
+  "validation_tail_ratio": {
+    "iforest": 0.25418261495635663,
+    "knn": 0.31897673740316934
+  },
+  "selection_rule": "正常验证分数尾部离散度 (p99-p95)/(p95-p50) 更小者上线；阈值仍各取 95 分位",
+  "n_normal_train": 24,
+  "n_normal_val": 8,
+  "feature_config": {
+    "sample_rate": 16000,
+    "channel_index": 0,
+    "clip_duration_s": 10.0,
+    "n_fft": 1024,
+    "hop_length": 512,
+    "n_bands": 64,
+    "feature_dim": 128,
+    "fmin_hz": 20.0,
+    "fmax_hz": 8000.0,
+    "band_aggregation": "每带对数功率的时间均值 + 标准差"
+  },
+  "dataset": {
+    "name": "MIMII public 1.0 (pump)",
+    "version": "1.0",
+    "url": "https://zenodo.org/records/3384388",
+    "archive": "6_dB_pump.zip",
+    "archive_md5": "a09ba6060c10fc09cd4c8770213b0b9f",
+    "license": "CC BY-SA 4.0",
+    "subset": "pump / id_00 起的正常与异常录音（+6 dB 噪声条件）",
+    "task": "水泵声音二分类异常复核（normal / suspected_anomaly）",
+    "limits": "公开工业录音，非海工现场采集；分数不是故障概率；仅取 +6 dB 单一噪声条件"
+  },
+  "data_root": "data\\demo_raw",
+  "versions": {
+    "sklearn": "1.9.1",
+    "numpy": "2.5.4",
+    "python": "3.13.14"
+  }
+}
