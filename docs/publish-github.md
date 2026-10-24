@@ -92,6 +92,11 @@ D:\Users\yxh\AppData\Local\Git\git-bash.exe
 - **执行**：粘贴后按回车，等光标重新出现（提示符 `$` 回来）再粘下一条
 - 一次只粘一条，不要整段粘
 
+> **踩坑预警：粘贴后命令行出现 `^[200~`、报 `$'\E[200~git': command not found`**  
+> 这是终端「括号粘贴」的转义标记被当成普通字符粘进去了，不是命令写错，也不是 Git 坏了。  
+> 处理：`Ctrl+C` 清掉当前行，重新粘一次；还不行就**手打**这一条。
+> 命令末尾也常被带入多余空格（如邮箱引号内多了个空格），粘完扫一眼再回车。
+
 窗口里显示 `$` 或 `用户名@主机 UCRT64 /c/... (main)` 表示可以输入了。  
 看到 `>` 单独成行表示上一条命令没写完（多半是引号没配对），按 `Ctrl+C` 退出重来。
 
@@ -149,6 +154,7 @@ Git 的惯例是**成功时保持沉默**，不输出反而是好事。
 ```bash
 git init -b main          # 已执行，分支为 main
 git add -A                # 已执行，49 个文件已暂存
+git commit -m "..."       # 已执行，提交号 f6ed147
 ```
 
 已确认：
@@ -166,9 +172,9 @@ git add -A                # 已执行，49 个文件已暂存
 
 ## 二、配置提交身份
 
-> 实测当前状态：`user.name` 和 `user.email` **都还是空的**（只配过 `core.editor` 指向 VS Code）。  
-> 不配这两项就提交，会报  
-> `Author identity unknown / Please tell me who you are`，提交直接失败。
+> 实测当前状态：**已配置完成**。  
+> `user.name = xiao-o-o`、`user.email = 294380548+xiao-o-o@users.noreply.github.com`（已核对，引号内无多余空格）。  
+> 未配这两项就提交会报 `Author identity unknown / Please tell me who you are`，提交直接失败。
 
 提交信息里的姓名和邮箱会**永久公开**在仓库历史里。建议用 GitHub 的匿名邮箱，不暴露真实邮箱。
 
@@ -180,7 +186,7 @@ git add -A                # 已执行，49 个文件已暂存
 
 ```bash
 git config --global user.name "xiao-o-o"
-git config --global user.email "294380548+xiao-o-o@users.noreply.github.com "
+git config --global user.email "294380548+xiao-o-o@users.noreply.github.com"
 ```
 
 > `--global` 表示对这台机器所有仓库生效，只需配一次。  
@@ -190,14 +196,17 @@ git config --global user.email "294380548+xiao-o-o@users.noreply.github.com "
 
 ## 三、首次提交
 
+**已完成**，提交号 `f6ed147`，51 个文件入库。
+
 ```bash
-git commit -m "v0.6: 单页 Streamlit + 单 Agent + A/C/D 模块 + LLM 决策器"
+git commit -m "初始提交：海工智维多设备声学运维原型"   # 已执行
 ```
 
-成功后应看到 `49 files changed`。用下面这条确认提交内容：
+如需自己复核：
 
 ```bash
-git show --stat --oneline HEAD
+git log --oneline -1        # 应显示 f6ed147 初始提交…
+git status --short          # 应无任何输出（工作区干净）
 ```
 
 ---
