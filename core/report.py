@@ -71,18 +71,34 @@ def build_markdown_report(
     ]
 
     if plan:
+        plan_status = plan.get("status")
+        actual_start = str(plan.get("start_node") or start_node or "—")
+        actual_closed = (
+            plan.get("closed_edges")
+            if "closed_edges" in plan
+            else (closed_edges or [])
+        )
         lines += [
             "",
             "## 二、巡检计划",
             "",
             f"- 数据来源：{'模拟检测结果' if plan_is_mock else '真实检测结果'}（规划算法来自 D 模块）",
-            f"- 规划状态：{STATUS_ZH.get(plan.get('status'), plan.get('status') or '—')}",
-            f"- 起点节点：{start_node}",
-            f"- 临时关闭通道：{'、'.join(closed_edges or []) or '无'}",
-            f"- 访问顺序：{' → '.join(plan.get('visit_order') or []) or '无'}",
-            f"- 总距离：{plan.get('total_distance_m', '—')} m",
-            f"- 不可达设备：{'、'.join(plan.get('unreachable_asset_ids') or []) or '无'}",
+            f"- 规划状态：{STATUS_ZH.get(plan_status, plan_status or '—')}",
         ]
+        if plan_status == "invalid_input":
+            lines += [
+                "- 本次规划失败：D 返回 invalid_input，**不能用旧路线代替本次结果**。",
+                f"- 失败原因：{'；'.join(plan.get('notes') or []) or '—'}",
+            ]
+        else:
+            lines += [
+                f"- 实际使用起点：{actual_start}",
+                f"- 实际关闭通道：{'、'.join(actual_closed or []) or '无'}",
+                f"- 访问顺序：{' → '.join(plan.get('visit_order') or []) or '无'}",
+                f"- 完整路线节点：{' → '.join(plan.get('route_nodes') or []) or '无'}",
+                f"- 总距离：{plan.get('total_distance_m', '—')} m",
+                f"- 不可达设备：{'、'.join(plan.get('unreachable_asset_ids') or []) or '无'}",
+            ]
         if plan.get("map_file"):
             lines.append(f"- 路线图：`{plan['map_file']}`")
 
@@ -90,8 +106,15 @@ def build_markdown_report(
     if is_mock:
         lines.append("- 本报告分数为模拟数据，仅用于流程演示，**不得作为正式巡检结论**。")
     lines.append("- 分数是模型给出的相对异常程度，不是故障概率，也不判断具体损坏部件。")
-    lines.append("- 模型基于公开工业数据（MIMII 水泵）训练，迁移到其他机型或安装方式时结论可能不成立。")
+    lines.append(
+        "- 当前模型与两条演示录音按团队「合成演示」口径说明；"
+        "MIMII 是计划采用的公开数据集参考，不能据此声称当前已完成真实数据训练。"
+    )
     lines.append("- 场景为模拟厂区，路线与距离按 scene/ 场景表计算，不代表真实厂区布局。")
+    lines.append(
+        "- 「规划案例对照（模拟输入）」是团队手工设定的规划案例，"
+        "不是 A 的录音检测结果，也不会写入本报告的检测结论。"
+    )
 
     lines += ["", "## 四、人工复核建议", ""]
     if abnormal:

@@ -10,6 +10,21 @@ from matplotlib.lines import Line2D
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def _cjk_font():
+    """返回可用的中文字体名；没有则返回 None（图中改用英文）。"""
+    fonts = {f.name for f in font_manager.fontManager.ttflist}
+    return next(
+        (
+            name for name in [
+                "Microsoft YaHei", "SimHei",
+                "Noto Sans CJK SC", "Noto Sans CJK JP"
+            ]
+            if name in fonts
+        ),
+        None
+    )
+
+
 def _table(folder, filename, columns):
     data = pd.read_csv(
         folder / filename,
@@ -299,6 +314,126 @@ def render_route(scene_dir, route_nodes, output_path, closed_edges=None):
             output.parent.mkdir(parents=True, exist_ok=True)
             fig.savefig(output, dpi=150)
 
+        finally:
+            plt.close(fig)
+
+    return relative.as_posix()
+
+
+def render_plan_comparison(
+    output_path,
+    baseline,
+    optimized,
+    title=None,
+    unreachable=None,
+):
+    """绘制固定顺序与优化方案的距离对比图（不是路线图）。
+
+    baseline / optimized 各含 visit_order（或 order）与 total_distance_m。
+    返回相对项目根目录的 PNG 路径。
+    """
+    output = (ROOT / output_path).resolve()
+    relative = output.relative_to(ROOT)
+
+    if output.suffix.lower() != ".png":
+        raise ValueError("output_path 必须以 .png 结尾")
+
+    def _one_plan(name, plan):
+        if not isinstance(plan, dict):
+            raise ValueError(f"{name} 必须是对象")
+        distance = plan.get("total_distance_m")
+        try:
+            distance = float(distance)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{name} 的 total_distance_m 不是数值") from exc
+        if not math.isfinite(distance) or distance < 0:
+            raise ValueError(f"{name} 的距离必须是非负有限数值")
+        order = plan.get("visit_order") or plan.get("order") or []
+        if not isinstance(order, (list, tuple)):
+            raise ValueError(f"{name} 的访问顺序必须是数组")
+        return distance, [str(item) for item in order]
+
+    baseline_distance, baseline_order = _one_plan("baseline", baseline)
+    optimized_distance, optimized_order = _one_plan("optimized", optimized)
+
+    unreachable = [str(item) for item in (unreachable or [])]
+    font = _cjk_font()
+    labels = (
+        ["固定顺序", "优化方案"] if font else ["Fixed order", "Optimized"]
+    )
+    orders = [
+        " → ".join(baseline_order) or "无",
+        " → ".join(optimized_order) or "无",
+    ]
+    distances = [baseline_distance, optimized_distance]
+    colors = ["#7A8794", "#287FA0"]
+
+    with plt.rc_context({
+        "font.family": font or "DejaVu Sans",
+        "axes.unicode_minus": False,
+    }):
+        fig, ax = plt.subplots(figsize=(9, 4.8))
+        try:
+            bars = ax.barh(labels, distances, color=colors, height=0.48)
+            max_distance = max(distances + [1.0])
+            for bar, distance, order in zip(bars, distances, orders):
+                ax.text(
+                    distance + max_distance * 0.02,
+                    bar.get_y() + bar.get_height() / 2,
+                    f"{distance:g} m ｜ {order}",
+                    va="center",
+                    fontsize=10,
+                )
+
+            difference = baseline_distance - optimized_distance
+            if abs(difference) < 1e-9:
+                summary = "两种顺序距离相同" if font else "Same distance"
+            elif difference > 0:
+                summary = (
+                    f"优化方案少走 {difference:g} m"
+                    if font else f"Optimized saves {difference:g} m"
+                )
+            else:
+                summary = (
+                    f"优化方案多走 {abs(difference):g} m"
+                    if font else f"Optimized costs {abs(difference):g} m more"
+                )
+
+            ax.set_xlim(0, max_distance * 1.45)
+            ax.set_xlabel("累计路网距离（米）" if font else "Total network distance (m)")
+            ax.set_title(
+                title or ("固定顺序与优化方案距离对比（模拟案例）" if font else "Fixed vs optimized (simulated)"),
+                fontsize=15,
+                pad=14,
+            )
+            ax.grid(axis="x", alpha=0.2)
+            ax.text(
+                0.0, -0.28,
+                summary,
+                transform=ax.transAxes,
+                fontsize=11,
+                color="#40566B",
+            )
+            if unreachable:
+                ax.text(
+                    0.0, -0.38,
+                    ("不可达设备：" if font else "Unreachable: ") + "、".join(unreachable),
+                    transform=ax.transAxes,
+                    fontsize=10,
+                    color="#C84545",
+                )
+            fig.text(
+                0.5, 0.02,
+                "模拟输入：状态由团队手工设定，不是 A 的录音检测结果"
+                if font else
+                "Simulated inputs, not audio detection results",
+                ha="center",
+                fontsize=9,
+                color="#607080",
+            )
+            fig.subplots_adjust(left=0.18, right=0.98, top=0.86, bottom=0.26)
+            output.parent.mkdir(parents=True, exist_ok=True)
+            fig.savefig(output, dpi=150)
         finally:
             plt.close(fig)
 

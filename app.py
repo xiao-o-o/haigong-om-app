@@ -40,6 +40,12 @@ from agent.loop import (  # noqa: E402
 )
 from core.llm import current_config as llm_config  # noqa: E402
 from core import runlog  # noqa: E402
+from core import cd_state  # noqa: E402
+from core.cd_cases import (  # noqa: E402
+    CaseFileError,
+    case_detection_results,
+    load_cases,
+)
 from agent.tools import (  # noqa: E402
     TOOL_SPECS,
     detect_assets_audio,
@@ -52,10 +58,26 @@ from core.local_modules import (  # noqa: E402
     asset_ids,
     audio_analyzer,
     check_modules,
+    comparison_planner,
+    edge_ids,
     list_assets,
     list_edges,
     node_ids,
     sample_files,
+)
+from spatial_module.mission import (  # noqa: E402
+    COMPLETION_NOTE,
+    STATUS_ACTIVE,
+    STATUS_BLOCKED,
+    STATUS_COMPLETED,
+    STATUS_NO_TARGETS,
+    MissionError,
+    confirm_asset,
+    create_mission,
+    mission_is_stale,
+    mission_to_json,
+    replan_mission,
+    step_forward,
 )
 
 UPLOAD_DIR = PROJECT_ROOT / "runs" / "uploads"
@@ -73,12 +95,51 @@ st.session_state.setdefault("agent_usage", {"rounds": 0, "calls": 0})
 st.session_state.setdefault("detect_items", [])       # 最近一次送检的 [{asset_id, path, filename}]
 st.session_state.setdefault("detections", [])          # 最近一次检测结果（A schema）
 st.session_state.setdefault("detections_is_mock", False)
-st.session_state.setdefault("plan_result", None)
-st.session_state.setdefault("plan_is_mock", False)
+st.session_state.setdefault("detection_input_signature", None)  # 当前检测结果对应的输入指纹
+st.session_state.setdefault("detect_error", "")
+st.session_state.setdefault("detect_notice", "")
 st.session_state.setdefault("detect_run_id", "")
 st.session_state.setdefault("detect_log_path", "")
+st.session_state.setdefault("plan_result", None)
+st.session_state.setdefault("plan_is_mock", False)
+st.session_state.setdefault("plan_context", None)      # 生成路线时的起点/关闭通道
+st.session_state.setdefault("plan_start_node", "S")
+st.session_state.setdefault("plan_closed_edges", [])
+st.session_state.setdefault("plan_used_start_node", "S")
+st.session_state.setdefault("plan_used_closed_edges", [])
+st.session_state.setdefault("plan_error", "")
+st.session_state.setdefault("plan_notice", "")
 st.session_state.setdefault("last_agent", None)      # 最近一次 Agent 结果（含轨迹与日志路径）
+st.session_state.setdefault("cd_case_result", None)   # 模拟案例对照，与真实检测/规划分开保存
+st.session_state.setdefault("cd_case_id", "")
+st.session_state.setdefault("cd_case_error", "")
+st.session_state.setdefault("mission", None)          # 当前会话的巡检执行任务
+st.session_state.setdefault("mission_error", "")
+st.session_state.setdefault("mission_notice", "")
+st.session_state.setdefault("mission_closed_edges", [])
+st.session_state.setdefault("_current_input_signature", "")
+st.session_state.setdefault("_pending_plan_start_node", None)
+st.session_state.setdefault("_pending_plan_closed_edges", None)
+st.session_state.setdefault("_pending_mission_closed_edges", None)
 
+# Agent 在页面之后执行，不能直接改已经创建过的 widget 状态。
+# 先把要同步的值放这里，下一次 rerun 在 widget 创建前应用。
+if st.session_state.get("_pending_plan_start_node") is not None:
+    pending_start = st.session_state.pop("_pending_plan_start_node")
+    if pending_start in node_ids():
+        st.session_state["plan_start_node"] = pending_start
+if st.session_state.get("_pending_plan_closed_edges") is not None:
+    pending_closed = st.session_state.pop("_pending_plan_closed_edges")
+    valid_edges = set(edge_ids())
+    st.session_state["plan_closed_edges"] = [
+        edge for edge in pending_closed if edge in valid_edges
+    ]
+if st.session_state.get("_pending_mission_closed_edges") is not None:
+    pending_mission_closed = st.session_state.pop("_pending_mission_closed_edges")
+    valid_edges = set(edge_ids())
+    st.session_state["mission_closed_edges"] = [
+        edge for edge in pending_mission_closed if edge in valid_edges
+    ]
 
 def _stage_upload(uploaded_file) -> str:
     """把上传内容落盘到 runs/uploads/，返回绝对路径。"""
@@ -92,6 +153,46 @@ def _stage_upload(uploaded_file) -> str:
 def _abs_asset_path(rel_or_abs: str) -> Path:
     path = Path(rel_or_abs)
     return path if path.is_absolute() else PROJECT_ROOT / path
+
+
+def _clear_plan_state(message: str = "", notice: bool = True) -> None:
+    """清掉旧路线，但保留仍然有效的检测结果。"""
+    st.session_state.plan_result = None
+    st.session_state.plan_is_mock = False
+    st.session_state.plan_context = None
+    st.session_state.plan_error = ""
+    if notice and message:
+        st.session_state.plan_notice = message
+
+
+def _clear_detection_state(message: str = "", notice: bool = True) -> None:
+    """清掉检测结果及其派生的路线、任务回答。"""
+    st.session_state.detections = []
+    st.session_state.detections_is_mock = False
+    st.session_state.detection_input_signature = None
+    st.session_state.detect_items = []
+    st.session_state.detect_error = ""
+    st.session_state.detect_run_id = ""
+    st.session_state.detect_log_path = ""
+    st.session_state.last_agent = None
+    _clear_plan_state("", notice=False)
+    if notice and message:
+        st.session_state.detect_notice = message
+
+
+def _pending_signature(source: str, mode: str, items: list[dict]) -> str:
+    return cd_state.build_detection_signature(mode, source, items)
+
+
+# B：在页面各 tab 渲染之前就让旧路线失效，避免报告区先拿到上一帧的旧计划。
+if st.session_state.plan_result and not cd_state.same_plan_context(
+    st.session_state.plan_context,
+    st.session_state.get("plan_start_node", "S"),
+    st.session_state.get("plan_closed_edges") or [],
+):
+    _clear_plan_state(
+        "起点或关闭通道已变化：旧路线已清除，检测结果仍保留，请重新规划。"
+    )
 
 
 def _to_csv_bytes(rows: list[dict]) -> bytes:
@@ -168,21 +269,29 @@ def _render_agent_result(res) -> None:
 
     if res.detections:
         st.caption("检测结果已同步到「② 音频检测」与「③ 巡检规划」。")
-    if res.plan:
+    if res.mission:
+        st.caption(
+            f"巡检任务已更新（{res.mission.get('mission_id')}）；"
+            "切到「③ 巡检规划」可继续执行。"
+        )
+    elif res.plan:
         st.caption("巡检计划已写入；切到「③ 巡检规划」可查看优先级、路线与地图。")
 
 
 def _render_plan(d: dict, is_mock: bool, start_node: str = "S") -> None:
     status = d.get("status")
+    actual_start = d.get("start_node") or start_node
+    actual_closed = d.get("closed_edges") or []
     st.markdown(
         f"**规划状态：** `{status}` · {STATUS_ZH.get(status, '')}　"
         f"**总距离：** {d.get('total_distance_m')} m　"
-        f"**起点：** {start_node}"
+        f"**起点：** {actual_start}　"
+        f"**关闭通道：** {'、'.join(actual_closed) if actual_closed else '无'}"
     )
     if is_mock:
         st.caption("数据来源：模拟检测结果 + D 的真实规划算法（路线与距离按真实场景表计算）")
     else:
-        st.caption("数据来源：A 的真实检测结果 + D 的真实规划算法")
+        st.caption("数据来源：A 模型推理结果 + D 的真实规划算法（当前模型按合成演示口径）")
 
     col1, col2 = st.columns(2)
     with col1:
@@ -222,6 +331,579 @@ def _render_plan(d: dict, is_mock: bool, start_node: str = "S") -> None:
             st.warning(f"规划返回了地图路径但文件不存在：{map_file}")
 
 
+def _render_cd_case_section() -> None:
+    """规划案例对照：模拟输入，和 A 的录音检测结果完全分开保存。"""
+    st.subheader("规划案例对照（模拟输入）")
+    st.caption(
+        "这里用团队手工设定的设备状态，只比较两种检查顺序。"
+        "它不会覆盖上面的录音检测结果，也不会写进录音检测报告。"
+    )
+    try:
+        bundle = load_cases()
+    except CaseFileError as exc:
+        st.error(f"案例文件读取失败：{exc}")
+        return
+
+    st.info(bundle["disclaimer"])
+
+    labels = {
+        f"{case['case_id']} · {case['name']}": case for case in bundle["cases"]
+    }
+    selected_label = st.selectbox(
+        "选择案例",
+        list(labels),
+        key="cd_case_select",
+    )
+    case = labels[selected_label]
+    if st.session_state.cd_case_id != case["case_id"]:
+        st.session_state.cd_case_result = None
+        st.session_state.cd_case_error = ""
+
+    st.markdown("**案例条件（团队手工设定）**")
+    target_text = "、".join(
+        f"{target['asset_id']}（{STATUS_ZH.get(target['status'], target['status'])}）"
+        for target in case["targets"]
+    )
+    st.write(
+        f"- 起点：{case['start_node']}；关闭通道："
+        f"{'、'.join(case['closed_edges']) if case['closed_edges'] else '无'}"
+    )
+    st.write(f"- 检查目标：{target_text}")
+    if case.get("description"):
+        st.caption(case["description"])
+    st.caption("目标状态只用于规划演示，不包含模型分数，不能用于评价声音检测准确率。")
+
+    if st.button("运行案例对照", type="primary", key="run_cd_case"):
+        st.session_state.cd_case_error = ""
+        st.session_state.cd_case_result = None
+        try:
+            compare = comparison_planner()
+            result = compare(
+                case_detection_results(case),
+                start_node=case["start_node"],
+                closed_edges=case["closed_edges"],
+                output_dir="runs/cd_cases",
+            )
+        except Exception as exc:
+            st.session_state.cd_case_error = (
+                f"案例对照计算失败（{type(exc).__name__}）：{exc}"
+            )
+        else:
+            if result.get("status") == "invalid_input":
+                st.session_state.cd_case_error = (
+                    "案例对照失败：D 返回 invalid_input。"
+                    + "；".join(result.get("notes") or [])
+                )
+            else:
+                st.session_state.cd_case_result = {
+                    "case": case,
+                    "result": result,
+                    "run_id": runlog.new_run_id(),
+                    "ran_at": runlog.now_iso(),
+                }
+                st.session_state.cd_case_id = case["case_id"]
+
+    if st.session_state.cd_case_error:
+        st.error(st.session_state.cd_case_error)
+
+    entry = st.session_state.cd_case_result
+    if not entry or (entry.get("case") or {}).get("case_id") != case["case_id"]:
+        st.caption("选择案例后点击「运行案例对照」，页面会实际调用 D 规划并生成三张图。")
+        return
+
+    result = entry["result"]
+    baseline = result.get("baseline") or {}
+    optimized = result.get("optimized") or {}
+    comparison = result.get("comparison") or {}
+    unreachable = result.get("unreachable_asset_ids") or []
+
+    st.success(f"案例 {case['case_id']} 计算完成（模拟输入，不是录音检测结果）")
+    col_fixed, col_best = st.columns(2)
+    with col_fixed:
+        st.markdown("**固定顺序（基线）**")
+        st.metric("总距离", f"{baseline.get('total_distance_m')} m")
+        st.write("访问顺序：" + (" → ".join(baseline.get("visit_order") or []) or "无"))
+        st.code(
+            " → ".join(baseline.get("route_nodes") or []) or "—",
+            language="text",
+        )
+    with col_best:
+        st.markdown("**优化方案**")
+        st.metric("总距离", f"{optimized.get('total_distance_m')} m")
+        st.write("访问顺序：" + (" → ".join(optimized.get("visit_order") or []) or "无"))
+        st.code(
+            " → ".join(optimized.get("route_nodes") or []) or "—",
+            language="text",
+        )
+
+    st.write(f"**不可达设备：** {'、'.join(unreachable) if unreachable else '无'}")
+    st.write(
+        f"**距离差：** {comparison.get('distance_difference_m')} m　"
+        f"**改善比例：** {comparison.get('improvement_text')}"
+    )
+
+    explanation = comparison.get("summary") or ""
+    if result.get("status") == "partial":
+        explanation += (
+            f" {'、'.join(unreachable)} 不可达，保留在不可达清单中，"
+            "没有进入访问顺序；可达目标继续安排。"
+        )
+    if comparison.get("same_order"):
+        explanation += " 这个案例里两种顺序相同，所以距离相同。"
+    st.info(explanation.strip() or "本案例没有产生可比较的路线。")
+
+    map_files = result.get("map_files") or {}
+    map_specs = [
+        ("优化方案路线图", "optimized_route"),
+        ("固定顺序路线图", "fixed_route"),
+        ("距离对比图", "comparison_chart"),
+    ]
+    for caption, key in map_specs:
+        rel = map_files.get(key)
+        if not rel:
+            continue
+        png = _abs_asset_path(rel)
+        if png.is_file():
+            st.image(str(png), caption=f"{caption}：{rel}", width="stretch")
+        else:
+            st.warning(f"{caption}路径存在但文件不存在：{rel}")
+
+    with st.expander("运行记录（开发用）"):
+        st.caption(
+            "函数：spatial_module.plan.compare_inspection_plans("
+            "detection_results, start_node, closed_edges, output_dir)；"
+            "绘图由 C 的 render_route 与 render_plan_comparison 完成。"
+        )
+        st.code(
+            "compare_inspection_plans(\n"
+            f"    detection_results=case_detection_results({case['case_id']!r}),\n"
+            f"    start_node={case['start_node']!r},\n"
+            f"    closed_edges={case['closed_edges']!r},\n"
+            "    output_dir='runs/cd_cases',\n"
+            ")",
+            language="python",
+        )
+        st.caption(f"运行编号：{entry.get('run_id')} ｜ 时间：{entry.get('ran_at')}")
+        timing = result.get("timing") or {}
+        timing_rows = [
+            {"阶段": "计算（含建网、枚举、基线）", "耗时 ms": timing.get("calculation_total_ms")},
+            {"阶段": "其中：优化顺序枚举", "耗时 ms": timing.get("optimization_ms")},
+            {"阶段": "其中：固定基线", "耗时 ms": timing.get("baseline_calculation_ms")},
+            {"阶段": "绘图合计", "耗时 ms": timing.get("drawing_total_ms")},
+            {"阶段": "其中：优化路线图", "耗时 ms": timing.get("optimized_map_ms")},
+            {"阶段": "其中：固定路线图", "耗时 ms": timing.get("baseline_map_ms")},
+            {"阶段": "其中：对比图", "耗时 ms": timing.get("comparison_chart_ms")},
+        ]
+        st.table([row for row in timing_rows if row["耗时 ms"] is not None])
+        st.caption(
+            (timing.get("note") or "")
+            + " 这些是单次运行值，不能当作可靠的性能基准。"
+        )
+        st.json(result)
+
+
+def _mission_status_text(status: str) -> str:
+    return {
+        STATUS_ACTIVE: "进行中",
+        STATUS_BLOCKED: "受阻（有目标不可达）",
+        STATUS_COMPLETED: "巡检已完成",
+        STATUS_NO_TARGETS: "无需巡检",
+    }.get(status, status)
+
+
+def _mission_device_text(assets: list[str]) -> str:
+    return "、".join(assets) if assets else "无"
+
+
+def _mission_create_form(
+    rows: list[dict],
+    start_node: str,
+    closed_ids: list[str],
+    edge_options: list[str],
+    edge_labels: dict[str, str],
+    *,
+    has_mission: bool,
+    mission: dict | None,
+) -> None:
+    """新建任务表单；有任务时放在“替换”折叠区，必须再次确认。"""
+    try:
+        bundle = load_cases()
+    except CaseFileError as exc:
+        st.error(f"模拟案例读取失败：{exc}")
+        return
+
+    detection_label = "当前录音检测结果"
+    case_labels = {
+        f"{case['case_id']} · {case['name']}（手工模拟）": case
+        for case in bundle["cases"]
+    }
+    options = [detection_label] + list(case_labels)
+    selected = st.selectbox("任务来源", options, key="mission_source_select")
+
+    if selected == detection_label:
+        source_kind = "detection"
+        source_rows = list(rows)
+        source_label = (
+            f"当前录音检测结果（{'模拟数据' if st.session_state.detections_is_mock else 'A 模型推理'}）"
+        )
+        source_signature = st.session_state.get("_current_input_signature", "")
+        source_note = "来自当前有效录音检测结果；检测输入变化后任务会失效，需要重新创建。"
+        is_mock = bool(st.session_state.detections_is_mock)
+        task_start = start_node
+        task_closed = list(closed_ids)
+        case_id = ""
+        if not source_rows:
+            st.warning("当前没有检测结果，不能创建录音来源的任务。")
+        else:
+            st.caption(
+                f"使用上方当前起点 {start_node} 和关闭通道 "
+                f"{'、'.join(closed_ids) if closed_ids else '无'}；"
+                f"检测结果 {len(source_rows)} 条。"
+            )
+    else:
+        case = case_labels[selected]
+        source_kind = "simulation_case"
+        source_rows = case_detection_results(case)
+        source_label = f"{case['case_id']} · {case['name']}（手工模拟案例）"
+        source_signature = ""
+        source_note = bundle["disclaimer"]
+        is_mock = True
+        task_start = case["start_node"]
+        task_closed = list(case["closed_edges"])
+        case_id = case["case_id"]
+        st.info(bundle["disclaimer"])
+        st.caption(
+            f"案例起点 {task_start}；关闭通道 "
+            f"{'、'.join(task_closed) if task_closed else '无'}；"
+            f"目标 {'、'.join(t['asset_id'] for t in case['targets'])}。"
+        )
+
+    confirmed = True
+    if has_mission:
+        confirmed = st.checkbox(
+            "我确认结束/替换当前任务，用上面的来源新建任务",
+            key=f"mission_replace_confirm_{(mission or {}).get('mission_id', 'none')}",
+        )
+        st.warning("新建会替换当前会话中的任务状态；当前任务的导出请先下载。")
+
+    can_create = bool(source_rows) and confirmed
+    if st.button(
+        "创建并开始巡检任务",
+        type="primary",
+        disabled=not can_create,
+        key="mission_create",
+    ):
+        try:
+            new_mission = create_mission(
+                source_rows,
+                source_kind=source_kind,
+                source_label=source_label,
+                is_mock=is_mock,
+                source_signature=source_signature,
+                case_id=case_id,
+                source_note=source_note,
+                start_node=task_start,
+                closed_edges=task_closed,
+                output_dir="runs/missions",
+            )
+        except MissionError as exc:
+            st.session_state.mission_error = f"创建巡检任务失败：{exc}"
+        except Exception as exc:
+            st.session_state.mission_error = (
+                f"创建巡检任务失败（{type(exc).__name__}）：{exc}"
+            )
+        else:
+            st.session_state.mission = new_mission
+            st.session_state.mission_error = ""
+            st.session_state.mission_notice = (
+                f"任务 {new_mission['mission_id']} 已创建："
+                f"当前位置 {new_mission['current_node']}，"
+                f"待检 {_mission_device_text(new_mission['pending_assets'])}。"
+            )
+            st.session_state._pending_mission_closed_edges = list(
+                new_mission["closed_edges"]
+            )
+            st.rerun()
+
+
+def _render_mission_execution(
+    rows: list[dict],
+    start_node: str,
+    closed_ids: list[str],
+    edge_options: list[str],
+    edge_labels: dict[str, str],
+) -> None:
+    st.subheader("巡检执行（模拟）")
+    st.caption(
+        "记录当前位置、已完成设备、待检设备和已走距离。"
+        "前进只能走相邻的开放通道；到达设备节点后由人员确认，不自动完成。"
+    )
+
+    mission = st.session_state.mission
+    if st.session_state.mission_notice:
+        st.info(st.session_state.mission_notice)
+    if st.session_state.mission_error:
+        st.error(st.session_state.mission_error)
+
+    if not isinstance(mission, dict):
+        st.caption("当前没有巡检任务。可以从有效录音检测结果或 C1/C2/C3 手工模拟案例创建。")
+        _mission_create_form(
+            rows,
+            start_node,
+            closed_ids,
+            edge_options,
+            edge_labels,
+            has_mission=False,
+            mission=None,
+        )
+        return
+
+    source = mission.get("source") or {}
+    stale = mission_is_stale(
+        mission,
+        st.session_state.get("_current_input_signature", ""),
+        cd_state.detection_result_signature(rows),
+    )
+    status = mission.get("status")
+    current = mission.get("current_node")
+    walked = float(mission.get("walked_distance_m") or 0.0)
+    remaining = float(mission.get("remaining_distance_m") or 0.0)
+    expected = mission.get("expected_total_distance_m")
+    pending = list(mission.get("pending_assets") or [])
+    completed = list(mission.get("completed_assets") or [])
+    unreachable = list(mission.get("unreachable_assets") or [])
+    closed = list(mission.get("closed_edges") or [])
+    plan = mission.get("remaining_plan") or {}
+
+    st.markdown(
+        f"**任务状态：** `{status}` · {_mission_status_text(status)}　"
+        f"**任务编号：** `{mission.get('mission_id')}`"
+    )
+    st.caption(
+        f"来源：{source.get('label')} ｜ "
+        f"{'模拟输入（不是 A 的录音检测结果）' if source.get('is_mock') else 'A 模型推理结果'}"
+    )
+    if source.get("source_note"):
+        st.caption(source["source_note"])
+
+    if stale:
+        st.error(
+            "关联录音检测输入已变化：当前任务已失效，不能继续使用新检测数据执行。"
+            "请先导出记录，再在下方新建任务。"
+        )
+
+    invalid_notes = source.get("invalid_input_notes") or []
+    if invalid_notes:
+        st.warning("无效录音需要补录（没有被当成正常）：" + "；".join(invalid_notes))
+
+    if status == STATUS_COMPLETED:
+        st.success(
+            "巡检已完成：所有任务目标都已由人员确认检查完成。"
+            "这不代表故障已维修或设备恢复正常。"
+        )
+    elif status == STATUS_NO_TARGETS:
+        st.info("无需巡检：本次输入没有疑似异常目标。")
+    elif status == STATUS_BLOCKED:
+        st.error(
+            "任务受阻：待检目标全部不可达，剩余可行行走距离为 0，"
+            "但任务没有完成。可以恢复通道后重新规划。"
+        )
+    elif unreachable:
+        st.warning(
+            "任务尚未完成：还有不可达目标。下面的剩余距离只覆盖当前可达目标，"
+            "不能当作完成全部任务所需的总里程。"
+        )
+    else:
+        st.info("任务进行中：到达设备节点后请人工确认检查完成。")
+
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("当前位置", current or "—")
+    col2.metric("累计已走", f"{walked:g} m")
+    col3.metric(
+        "当前可达目标剩余距离" if unreachable else "剩余距离",
+        f"{remaining:g} m",
+    )
+    col4.metric(
+        "预计总里程",
+        f"{float(expected):g} m" if expected is not None else "不可用",
+    )
+
+    st.markdown(f"**待检设备（含不可达）：** {_mission_device_text(pending)}")
+    st.markdown(f"**已完成设备：** {_mission_device_text(completed)}")
+    st.markdown(f"**不可达设备：** {_mission_device_text(unreachable)}")
+    st.markdown(f"**关闭通道：** {_mission_device_text(closed)}")
+    route = list(plan.get("route_nodes") or [])
+    st.markdown("**当前剩余路线：**")
+    st.code(" → ".join(route) if route else "—", language="text")
+
+    map_file = plan.get("map_file")
+    if map_file:
+        png = _abs_asset_path(map_file)
+        if png.is_file():
+            st.image(str(png), caption=f"当前剩余路线图：{map_file}", width="stretch")
+        else:
+            st.warning(f"剩余路线图路径存在但文件不存在：{map_file}")
+
+    actions_disabled = stale or status in (STATUS_COMPLETED, STATUS_NO_TARGETS)
+    asset_nodes = {item["asset_id"]: item["node_id"] for item in list_assets()}
+    here = [asset_id for asset_id in pending if asset_nodes.get(asset_id) == current]
+
+    if not actions_disabled:
+        if st.button(
+            "沿当前路线前进一步",
+            key="mission_step",
+            disabled=status != STATUS_ACTIVE or len(route) < 2 or bool(here),
+            help="当前节点有待确认设备时，必须先确认检查完成才能继续走。",
+        ):
+            try:
+                new_mission = step_forward(mission)
+            except MissionError as exc:
+                st.session_state.mission_error = f"前进一步失败：{exc}"
+            else:
+                asset_nodes = {
+                    item["asset_id"]: item["node_id"] for item in list_assets()
+                }
+                arrived = [
+                    asset_id
+                    for asset_id in new_mission["pending_assets"]
+                    if asset_nodes.get(asset_id) == new_mission["current_node"]
+                ]
+                notice = (
+                    f"已走到 {new_mission['current_node']}，"
+                    f"累计已走 {new_mission['walked_distance_m']:g} m。"
+                )
+                if arrived:
+                    notice += f" 这里是 {'、'.join(arrived)} 的节点，请确认检查完成。"
+                st.session_state.mission = new_mission
+                st.session_state.mission_error = ""
+                st.session_state.mission_notice = notice
+                st.rerun()
+
+        if here:
+            confirm_target = st.selectbox(
+                "当前节点可确认的设备",
+                here,
+                key="mission_confirm_asset",
+            )
+            if st.button(
+                "确认当前设备检查完成",
+                key="mission_confirm",
+                disabled=stale,
+            ):
+                try:
+                    new_mission = confirm_asset(
+                        mission,
+                        confirm_target,
+                        output_dir="runs/missions",
+                    )
+                except MissionError as exc:
+                    st.session_state.mission_error = f"确认检查失败：{exc}"
+                else:
+                    st.session_state.mission = new_mission
+                    st.session_state.mission_error = ""
+                    st.session_state.mission_notice = (
+                        f"已确认 {confirm_target} 检查完成；"
+                        f"累计已走 {new_mission['walked_distance_m']:g} m，"
+                        f"待检 {_mission_device_text(new_mission['pending_assets'])}。"
+                    )
+                    st.rerun()
+        else:
+            st.caption("当前节点没有可确认的设备。")
+
+        st.markdown("**任务封路状态**")
+        mission_closed = st.multiselect(
+            "当前任务关闭通道",
+            edge_options,
+            format_func=lambda edge_id: edge_labels.get(edge_id, edge_id),
+            key="mission_closed_edges",
+            help="只影响当前巡检任务；应用后会从当前位置重算剩余路线。",
+        )
+        col_a, col_b = st.columns(2)
+        with col_a:
+            if st.button(
+                "应用封路并重新规划",
+                key="mission_replan",
+                disabled=stale or status == STATUS_COMPLETED,
+            ):
+                try:
+                    new_mission = replan_mission(
+                        mission,
+                        closed_edges=mission_closed,
+                        output_dir="runs/missions",
+                    )
+                except MissionError as exc:
+                    st.session_state.mission_error = f"任务重规划失败：{exc}"
+                else:
+                    st.session_state.mission = new_mission
+                    st.session_state.mission_error = ""
+                    st.session_state.mission_notice = (
+                        f"已从 {new_mission['current_node']} 重规划："
+                        f"{_mission_status_text(new_mission['status'])}，"
+                        f"剩余 {new_mission['remaining_distance_m']:g} m，"
+                        f"已走仍为 {new_mission['walked_distance_m']:g} m。"
+                    )
+                    st.rerun()
+        with col_b:
+            if st.button(
+                "按当前封路重算（不移动）",
+                key="mission_replan_same",
+                disabled=stale or status == STATUS_COMPLETED,
+            ):
+                try:
+                    new_mission = replan_mission(
+                        mission,
+                        closed_edges=closed,
+                        output_dir="runs/missions",
+                    )
+                except MissionError as exc:
+                    st.session_state.mission_error = f"任务重规划失败：{exc}"
+                else:
+                    st.session_state.mission = new_mission
+                    st.session_state.mission_error = ""
+                    st.session_state.mission_notice = (
+                        f"已重新计算剩余路线，已走距离仍为 "
+                        f"{new_mission['walked_distance_m']:g} m。"
+                    )
+                    st.rerun()
+
+    st.caption(COMPLETION_NOTE)
+
+    col_export, col_clear = st.columns(2)
+    with col_export:
+        st.download_button(
+            "导出任务 JSON",
+            mission_to_json(mission).encode("utf-8"),
+            file_name=f"mission_{mission.get('mission_id')}.json",
+            mime="application/json",
+            key="mission_download",
+        )
+    with col_clear:
+        if st.button(
+            "清除当前任务（不影响检测结果）",
+            key="mission_clear",
+        ):
+            st.session_state.mission = None
+            st.session_state.mission_error = ""
+            st.session_state.mission_notice = "当前任务已从本会话清除；检测结果未改变。"
+            st.session_state._pending_mission_closed_edges = []
+            st.rerun()
+
+    with st.expander("任务原始 JSON（开发用）"):
+        st.json(mission)
+
+    st.divider()
+    with st.expander("新建巡检任务（会替换当前任务）", expanded=False):
+        _mission_create_form(
+            rows,
+            start_node,
+            closed_ids,
+            edge_options,
+            edge_labels,
+            has_mission=True,
+            mission=mission,
+        )
+
+
 # ---------------------------------------------------------------------------
 # 侧边栏
 # ---------------------------------------------------------------------------
@@ -231,6 +913,7 @@ with st.sidebar:
         "运行模式",
         options=["模拟数据（mock）", "真实模型（real）"],
         index=0 if st.session_state.mode == "mock" else 1,
+        key="run_mode",
         help="real 模式在进程内调用 A 的 pump_v1 模型与 D 的规划算法；mock 只模拟检测分数，规划仍按真实场景计算。",
     )
     st.session_state.mode = "mock" if mode_label.startswith("模拟") else "real"
@@ -321,6 +1004,12 @@ with tab0:
         audio_analyzer.cache_clear()
         st.rerun()
 
+    st.caption(
+        "来源口径：当前随包模型与两条演示录音按团队「合成演示」说明，"
+        "不能据此声称已经完成 MIMII 真实数据训练；MIMII 仅作为计划采用的公开数据集参考。"
+        "本页的规划案例是团队手工设定的模拟输入，不是录音检测结果。"
+    )
+
     st.subheader("三个工具（不多不少）")
     st.table(TOOL_SPECS)
 
@@ -368,8 +1057,14 @@ with tab0:
         "agent/loop.py          单 Agent 主循环（6 轮 / 12 次预算 + 工具依赖链）\n"
         "agent/tools.py         三个工具（detect / plan / checklist）\n"
         "core/local_modules.py  三家模块的唯一 import 入口（A / C / D）\n"
-        "audio_module/  models/  samples/     A 交付（原样，未改动）\n"
-        "spatial_module/  scene/              D + C 交付（原样，未改动）\n"
+        "audio_module/  models/  samples/     A 交付（本轮未改动）\n"
+        "spatial_module/  scene/              C/D（兼容扩展，公开入口保留）\n"
+        "spatial_module/mission.py 巡检执行任务（行走/确认/重规划/导出）\n"
+        "core/cd_state.py      输入指纹、检测结果指纹与规划上下文比较\n"
+        "core/cd_cases.py      模拟规划案例读取\n"
+        "examples/             案例 JSON + 运行脚本\n"
+        "check_cd.py           第一轮检查\n"
+        "check_cd_mission.py   第二轮巡检执行检查\n"
         "knowledge/              本地检查资料",
         language="text",
     )
@@ -405,6 +1100,7 @@ with tab1:
             "上传文件",
         ],
         horizontal=True,
+        key="audio_source",
     )
 
     pending_items: list[dict] = []
@@ -458,10 +1154,47 @@ with tab1:
                 with col2:
                     st.caption(f"文件大小 {len(f.getbuffer()) / 1024:.1f} KB")
                 pending_items.append(
-                    {"asset_id": asset, "path": "", "filename": f.name, "_upload": f}
+                    {
+                        "asset_id": asset,
+                        "path": "",
+                        "filename": f.name,
+                        "content_sha256": cd_state.sha256_bytes(bytes(f.getbuffer())),
+                        "_upload": f,
+                    }
                 )
 
-    if st.button("开始检测", type="primary", disabled=not pending_items):
+    current_input_signature = _pending_signature(
+        source, st.session_state.mode, pending_items
+    )
+    st.session_state._current_input_signature = current_input_signature
+
+    # A：来源 / 运行模式 / 设备映射 / 文件内容任一变化，旧检测、旧路线、旧回答都失效。
+    # 同名文件也靠内容哈希识别，不能只看文件名。
+    if (
+        (
+            st.session_state.detections
+            or st.session_state.plan_result
+            or st.session_state.last_agent
+            or st.session_state.detect_error
+        )
+        and st.session_state.detection_input_signature != current_input_signature
+    ):
+        _clear_detection_state(
+            "音频来源、设备映射、文件内容或运行模式已变化："
+            "旧检测结果、旧路线和旧任务回答已清除，请重新检测。"
+        )
+        st.session_state.plan_notice = ""
+        st.session_state.plan_error = ""
+
+    if st.session_state.detect_notice:
+        st.info(st.session_state.detect_notice)
+    if st.session_state.detect_error:
+        st.error(st.session_state.detect_error)
+        st.caption("旧检测结果没有继续显示；请按错误提示修正输入后重新检测。")
+
+    if st.button(
+        "开始检测", type="primary", disabled=not pending_items, key="run_detect"
+    ):
         items = []
         for it in pending_items:
             if it.get("_upload") is not None:
@@ -477,6 +1210,13 @@ with tab1:
                     {"asset_id": it["asset_id"], "path": it["path"], "filename": it["filename"]}
                 )
 
+        # 先清旧结果再调用：即使本次失败，也不会让上一次的检测/路线继续假装是本轮结果。
+        _clear_detection_state("", notice=False)
+        st.session_state.detect_notice = ""
+        st.session_state.plan_notice = ""
+        st.session_state.detect_items = items
+        st.session_state.detection_input_signature = current_input_signature
+
         run_id = runlog.new_run_id()
         started_at = runlog.now_iso()
         with st.spinner(f"检测中（{len(items)} 个文件，计 1 次工具调用）……"):
@@ -487,7 +1227,6 @@ with tab1:
             )
         finished_at = runlog.now_iso()
 
-        st.session_state.detect_items = items
         st.session_state.detect_run_id = run_id
         log_payload = {
             "run_id": run_id,
@@ -511,15 +1250,19 @@ with tab1:
         if result.ok:
             st.session_state.detections = result.data["results"]
             st.session_state.detections_is_mock = result.is_mock
-            st.session_state.plan_result = None
+            st.session_state.detect_error = ""
+            st.session_state.plan_notice = ""
             if result.data["missing_asset_ids"]:
                 st.warning(
                     "以下设备没有对应音频，本次未检测（不会当作正常）："
                     + "、".join(result.data["missing_asset_ids"])
                 )
         else:
-            st.error(f"检测失败：{result.message}")
-            st.caption("失败时不会用模拟数据兜底。请检查音频规格或模块状态。")
+            st.session_state.detections = []
+            st.session_state.detections_is_mock = False
+            st.session_state.detect_error = f"检测失败：{result.message}"
+            st.error(st.session_state.detect_error)
+            st.caption("旧检测结果已清除；失败时不会用模拟数据兜底。")
 
     # 展示最近一次结果（rerun 后仍保留）
     rows = st.session_state.detections
@@ -566,7 +1309,10 @@ with tab1:
                     st.session_state.detect_log_path,
                     plan=st.session_state.plan_result,
                     plan_is_mock=st.session_state.plan_is_mock,
-                    start_node=st.session_state.get("plan_start_node", "S"),
+                    start_node=st.session_state.get("plan_used_start_node", "S"),
+                    closed_edges=list(
+                        st.session_state.get("plan_used_closed_edges") or []
+                    ),
                     expected_sample_rate=EXPECTED_SAMPLE_RATE,
                 ).encode("utf-8"),
                 file_name=f"report_{st.session_state.detect_run_id or 'result'}.md",
@@ -590,7 +1336,11 @@ with tab2:
     st.subheader("巡检规划（按检测结果排路线）")
     rows = st.session_state.detections
     edges = list_edges()
-    edge_options = [f"{e['edge_id']}（{e['from_node']}→{e['to_node']}）" for e in edges]
+    edge_labels = {
+        e["edge_id"]: f"{e['edge_id']}（{e['from_node']}→{e['to_node']}）"
+        for e in edges
+    }
+    edge_options = [e["edge_id"] for e in edges]
 
     if not rows:
         st.warning("尚无检测结果。巡检规划只按 A 的检测结果确定目标，请先在「② 音频检测」执行一次检测。")
@@ -601,65 +1351,131 @@ with tab2:
             "疑似异常的设备才会成为巡检目标。"
         )
 
-        col1, col2 = st.columns(2)
-        with col1:
-            closed = st.multiselect(
-                "临时关闭通道（可选）",
-                edge_options,
-                help="关闭后通行能力降级或目标不可达，可用于演示 partial（部分达成）。",
+    col1, col2 = st.columns(2)
+    with col1:
+        closed_ids = st.multiselect(
+            "临时关闭通道（可选）",
+            edge_options,
+            format_func=lambda edge_id: edge_labels.get(edge_id, edge_id),
+            key="plan_closed_edges",
+            help="关闭后通行能力降级或目标不可达，可用于演示 partial（部分达成）。",
+        )
+    with col2:
+        start_node = st.selectbox(
+            "起点节点",
+            node_ids(),
+            key="plan_start_node",
+        )
+
+    # E：起点/关闭通道变化时，检测结果保留，但旧路线立即失效。
+    if st.session_state.plan_result and not cd_state.same_plan_context(
+        st.session_state.plan_context, start_node, closed_ids
+    ):
+        _clear_plan_state(
+            "起点或关闭通道已变化：旧路线已清除，检测结果仍保留，请重新规划。"
+        )
+    if st.session_state.plan_notice:
+        st.info(st.session_state.plan_notice)
+    if st.session_state.plan_error:
+        st.error(st.session_state.plan_error)
+
+    if st.button(
+        "生成巡检计划", type="primary", disabled=not rows, key="run_plan"
+    ):
+        # 先清旧路线：规划失败时不能继续显示上一次的结果。
+        _clear_plan_state("", notice=False)
+        st.session_state.plan_notice = ""
+        st.session_state.plan_error = ""
+        with st.spinner("规划中（含路线枚举与绘图）……"):
+            result = plan_asset_inspection(
+                detection_results=rows,
+                closed_edges=closed_ids,
+                start_node=start_node,
+                input_is_mock=st.session_state.detections_is_mock,
             )
-        with col2:
-            start_node = st.selectbox("起点节点", node_ids(), index=0)
-
-        closed_ids = [c.split("（")[0] for c in closed]
-
-        if st.button("生成巡检计划", type="primary"):
-            with st.spinner("规划中（含路线枚举与绘图）……"):
-                result = plan_asset_inspection(
-                    detection_results=rows,
-                    closed_edges=closed_ids,
-                    start_node=start_node,
-                    input_is_mock=st.session_state.detections_is_mock,
-                )
-            if result.ok:
-                st.session_state.plan_result = result.data
-                st.session_state.plan_is_mock = result.is_mock
-                st.session_state.plan_start_node = start_node
-            else:
-                st.session_state.plan_result = None
-                st.error(f"规划失败：{result.message}")
-
-        if st.session_state.plan_result:
-            st.divider()
-            _render_plan(
-                st.session_state.plan_result,
-                st.session_state.plan_is_mock,
-                st.session_state.get("plan_start_node", "S"),
+        if (
+            result.ok
+            and isinstance(result.data, dict)
+            and result.data.get("status") != "invalid_input"
+        ):
+            st.session_state.plan_result = result.data
+            st.session_state.plan_is_mock = result.is_mock
+            actual_start = result.data.get("start_node") or start_node
+            actual_closed = list(
+                result.data.get("closed_edges")
+                if "closed_edges" in result.data
+                else closed_ids
             )
+            st.session_state.plan_used_start_node = actual_start
+            st.session_state.plan_used_closed_edges = actual_closed
+            st.session_state.plan_context = cd_state.plan_context(
+                actual_start, actual_closed
+            )
+            st.session_state.plan_error = ""
+        else:
+            st.session_state.plan_result = None
+            message = (
+                "D 返回 invalid_input" if result.ok else result.message
+            )
+            st.session_state.plan_error = f"规划失败：{message}"
+            st.error(st.session_state.plan_error)
 
-            with st.expander("规划结果原始 JSON"):
-                st.json(st.session_state.plan_result)
-
+    if st.session_state.plan_result:
         st.divider()
-        if st.button("只看场景地图（不做规划）"):
-            from core.local_modules import ModuleUnavailable, route_renderer
+        _render_plan(
+            st.session_state.plan_result,
+            st.session_state.plan_is_mock,
+            st.session_state.get("plan_used_start_node", "S"),
+        )
 
-            try:
-                rel = route_renderer()(
-                    scene_dir="scene",
-                    route_nodes=[start_node],
-                    output_path=f"runs/preview/scene_{uuid.uuid4().hex[:8]}.png",
-                    closed_edges=closed_ids,
+        baseline = st.session_state.plan_result.get("baseline") or {}
+        if baseline:
+            with st.expander("同条件固定顺序基线（D 内部计算，供对照）"):
+                st.write(
+                    "访问顺序："
+                    + (" → ".join(baseline.get("visit_order") or []) or "无")
                 )
-                png = _abs_asset_path(rel)
-                if png.is_file():
-                    st.image(str(png), caption=f"场景地图：{rel}", width="stretch")
-                else:
-                    st.warning(f"绘图返回路径但文件不存在：{rel}")
-            except ModuleUnavailable as exc:
-                st.error(str(exc))
-            except Exception as exc:
-                st.error(f"C 绘图失败（{type(exc).__name__}）：{exc}")
+                st.write(f"总距离：{baseline.get('total_distance_m')} m")
+                st.caption(
+                    "固定基线按重要等级降序、同等级按设备编号升序；"
+                    "与上面的优化方案使用同一起点、同一批可达目标和同样的开放通道。"
+                )
+
+        with st.expander("规划结果原始 JSON"):
+            st.json(st.session_state.plan_result)
+
+    st.divider()
+    if st.button("只看场景地图（不做规划）", key="preview_scene"):
+        from core.local_modules import ModuleUnavailable, route_renderer
+
+        try:
+            rel = route_renderer()(
+                scene_dir="scene",
+                route_nodes=[start_node],
+                output_path=f"runs/preview/scene_{uuid.uuid4().hex[:8]}.png",
+                closed_edges=closed_ids,
+            )
+            png = _abs_asset_path(rel)
+            if png.is_file():
+                st.image(str(png), caption=f"场景地图：{rel}", width="stretch")
+            else:
+                st.warning(f"绘图返回路径但文件不存在：{rel}")
+        except ModuleUnavailable as exc:
+            st.error(str(exc))
+        except Exception as exc:
+            st.error(f"C 绘图失败（{type(exc).__name__}）：{exc}")
+
+    st.divider()
+    _render_mission_execution(
+        rows,
+        start_node,
+        closed_ids,
+        edge_options,
+        edge_labels,
+    )
+
+    st.divider()
+    _render_cd_case_section()
 
 # ---------------------------------------------------------------------------
 # ④ 检查资料
@@ -716,12 +1532,42 @@ with tab4:
     question = st.text_input(
         "描述任务",
         placeholder="例：检测 P01 和 P04，然后关闭 E04 出一条巡检路线",
+        key="agent_question",
     )
-    if st.button("交给 Agent", type="primary", disabled=not question.strip()):
+    if st.button(
+        "交给 Agent",
+        type="primary",
+        disabled=not question.strip(),
+        key="run_agent",
+    ):
+        agent_input_signature = st.session_state.get("_current_input_signature", "")
+        active_mission = (
+            st.session_state.mission
+            if isinstance(st.session_state.mission, dict)
+            else None
+        )
+        agent_mission_stale = mission_is_stale(
+            active_mission,
+            agent_input_signature,
+            cd_state.detection_result_signature(st.session_state.detections),
+        )
         context = {
             "files": files_ctx,
             "detections": st.session_state.detections,
             "detections_is_mock": st.session_state.detections_is_mock,
+            "start_node": (
+                active_mission.get("current_node")
+                if active_mission
+                else st.session_state.get("plan_start_node", "S")
+            ),
+            "closed_edges": list(
+                active_mission.get("closed_edges") or []
+                if active_mission
+                else st.session_state.get("plan_closed_edges") or []
+            ),
+            "mission": active_mission,
+            "mission_stale": agent_mission_stale,
+            "detection_signature": agent_input_signature,
         }
         with st.spinner("Agent 执行中……"):
             result = run_agent(
@@ -734,19 +1580,114 @@ with tab4:
         st.session_state.agent_usage["rounds"] += result.rounds_used
         st.session_state.agent_usage["calls"] += result.calls_used
 
-        if result.detections:
+        detect_steps = [
+            step for step in result.steps if step.tool == "detect_assets_audio"
+        ]
+        plan_steps = [
+            step for step in result.steps if step.tool == "plan_asset_inspection"
+        ]
+
+        # 新任务检测失败：旧检测、旧路线、旧回答不能继续冒充本次结果。
+        if result.detections_attempted and not result.detections:
+            _clear_detection_state("", notice=False)
+            st.session_state.detect_items = list(files_ctx)
+            st.session_state.detection_input_signature = agent_input_signature
+            st.session_state.detect_error = (
+                "Agent 检测失败：旧检测结果与旧路线已清除，请查看上方失败原因。"
+            )
+            st.session_state.plan_notice = ""
+            st.session_state.plan_error = ""
+        elif result.detections:
             st.session_state.detections = result.detections
             st.session_state.detections_is_mock = any(
-                s.is_mock for s in result.steps if s.tool == "detect_assets_audio"
+                step.is_mock for step in detect_steps
             )
+            st.session_state.detection_input_signature = agent_input_signature
+            st.session_state.detect_error = ""
+            st.session_state.detect_notice = ""
+            st.session_state.detect_run_id = result.run_id
+            st.session_state.detect_log_path = result.log_path
+            _clear_plan_state("", notice=False)
+            st.session_state.plan_notice = ""
 
-        if result.plan:
-            # 真正写回状态，否则「③ 巡检规划」看不到 Agent 生成的路线
-            st.session_state.plan_result = result.plan
-            st.session_state.plan_is_mock = st.session_state.detections_is_mock
-            st.session_state.plan_start_node = result.plan_start_node
+        # 巡检执行任务与第一轮静态规划分开写回。
+        if result.mission_attempted:
+            if result.mission:
+                st.session_state.mission = result.mission
+                st.session_state.mission_error = ""
+                action = (
+                    (plan_steps[-1].args or {}).get("mission_action")
+                    if plan_steps
+                    else "auto"
+                )
+                st.session_state.mission_notice = (
+                    f"Agent 已{'新建' if action == 'create' else '重规划'}任务 "
+                    f"{result.mission.get('mission_id')}："
+                    f"当前位置 {result.mission.get('current_node')}，"
+                    f"已走 {result.mission.get('walked_distance_m')} m，"
+                    f"待检 {_mission_device_text(result.mission.get('pending_assets') or [])}。"
+                )
+                st.session_state._pending_mission_closed_edges = list(
+                    result.mission.get("closed_edges") or []
+                )
+            else:
+                failure = (
+                    plan_steps[-1].error
+                    if plan_steps and plan_steps[-1].error
+                    else result.answer
+                )
+                st.session_state.mission_error = f"Agent 任务操作失败：{failure}"
+            # 活动任务不会覆盖第一轮的静态路线和模拟案例结果。
+        elif result.plan_attempted:
+            # 新任务规划失败：旧路线必须清掉；检测结果若本次有效则保留。
+            if result.plan:
+                st.session_state.plan_result = result.plan
+                plan_is_mock = (
+                    plan_steps[-1].is_mock
+                    if plan_steps
+                    else st.session_state.detections_is_mock
+                )
+                st.session_state.plan_is_mock = plan_is_mock
+                actual_start = (
+                    result.plan.get("start_node")
+                    or result.plan_start_node
+                    or st.session_state.get("plan_start_node", "S")
+                )
+                actual_closed = list(
+                    result.plan.get("closed_edges")
+                    if "closed_edges" in result.plan
+                    else result.plan_closed_edges
+                )
+                st.session_state.plan_used_start_node = actual_start
+                st.session_state.plan_used_closed_edges = actual_closed
+                st.session_state.plan_context = cd_state.plan_context(
+                    actual_start, actual_closed
+                )
+                st.session_state.plan_error = ""
+                st.session_state.plan_notice = ""
+                if (
+                    st.session_state.get("plan_start_node", "S") != actual_start
+                    or sorted(st.session_state.get("plan_closed_edges") or [])
+                    != sorted(actual_closed)
+                ):
+                    st.session_state._pending_plan_start_node = actual_start
+                    st.session_state._pending_plan_closed_edges = actual_closed
+            else:
+                _clear_plan_state("", notice=False)
+                st.session_state.plan_error = (
+                    "Agent 规划失败：旧路线已清除，检测结果仍保留；"
+                    "请查看上方失败原因后重新规划。"
+                )
+                st.session_state.plan_notice = ""
 
         st.session_state.last_agent = result
+        if (
+            result.detections_attempted
+            or result.plan_attempted
+            or result.mission_attempted
+        ):
+            # Agent 在页面下方执行；rerun 后检测区、规划区和任务区都拿到同一份新状态。
+            st.rerun()
 
     # 轨迹与结论从 Session State 渲染：页面重跑后仍可见，且只在本会话内存在
     if st.session_state.last_agent is not None:
@@ -755,4 +1696,8 @@ with tab4:
         st.caption("还没有执行过任务。")
 
 st.divider()
-st.caption("海工智维 · 声学B ｜ 应用与 Agent ｜ A: audio_module · C: spatial_module.visualize · D: spatial_module.plan")
+st.caption(
+    "海工智维 · 声学B ｜ 应用与 Agent ｜ "
+    "A: audio_module · C: spatial_module.visualize · D: spatial_module.plan ｜ "
+    "C/D 补丁 CD-R2-20261025"
+)

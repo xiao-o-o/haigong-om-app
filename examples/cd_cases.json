@@ -1,0 +1,98 @@
+{
+  "schema_version": "1.0",
+  "generated_by": "C/D 联合优化",
+  "disclaimer": "这些状态由团队手工设定，用于验证规划，不是 A 的录音检测结果，不能用于评价声音检测准确率。案例只提供设备编号、状态和来源说明，不包含模型分数。",
+  "cases": [
+    {
+      "case_id": "C1",
+      "name": "同等级两台设备：顺序影响距离",
+      "description": "P02 和 P05 都是重要等级 2，用来比较检查顺序对路网距离的影响。",
+      "start_node": "S",
+      "closed_edges": [],
+      "targets": [
+        {
+          "asset_id": "P02",
+          "status": "suspected_anomaly",
+          "source_note": "团队手工设定，仅用于规划演示，不是录音检测结果"
+        },
+        {
+          "asset_id": "P05",
+          "status": "suspected_anomaly",
+          "source_note": "团队手工设定，仅用于规划演示，不是录音检测结果"
+        }
+      ],
+      "expected": {
+        "status": "ok",
+        "optimized_visit_order": ["P05", "P02"],
+        "optimized_total_distance_m": 70.0,
+        "baseline_visit_order": ["P02", "P05"],
+        "baseline_total_distance_m": 90.0,
+        "unreachable_asset_ids": []
+      }
+    },
+    {
+      "case_id": "C2",
+      "name": "重要等级 3→2→1",
+      "description": "P01、P02、P04 的重要等级分别是 3、2、1，用来检查访问顺序是否始终满足等级从高到低。",
+      "start_node": "S",
+      "closed_edges": [],
+      "targets": [
+        {
+          "asset_id": "P01",
+          "status": "suspected_anomaly",
+          "source_note": "团队手工设定，仅用于规划演示，不是录音检测结果"
+        },
+        {
+          "asset_id": "P02",
+          "status": "suspected_anomaly",
+          "source_note": "团队手工设定，仅用于规划演示，不是录音检测结果"
+        },
+        {
+          "asset_id": "P04",
+          "status": "suspected_anomaly",
+          "source_note": "团队手工设定，仅用于规划演示，不是录音检测结果"
+        }
+      ],
+      "expected": {
+        "status": "ok",
+        "optimized_visit_order": ["P01", "P02", "P04"],
+        "optimized_total_distance_m": 130.0,
+        "baseline_visit_order": ["P01", "P02", "P04"],
+        "baseline_total_distance_m": 130.0,
+        "unreachable_asset_ids": []
+      }
+    },
+    {
+      "case_id": "C3",
+      "name": "关闭 E09 后的部分达成",
+      "description": "P01、P02、P03 为异常目标，关闭 E09 后 P02 所在节点不可达；其余可达目标继续安排。",
+      "start_node": "S",
+      "closed_edges": ["E09"],
+      "targets": [
+        {
+          "asset_id": "P01",
+          "status": "suspected_anomaly",
+          "source_note": "团队手工设定，仅用于规划演示，不是录音检测结果"
+        },
+        {
+          "asset_id": "P02",
+          "status": "suspected_anomaly",
+          "source_note": "团队手工设定，仅用于规划演示，不是录音检测结果"
+        },
+        {
+          "asset_id": "P03",
+          "status": "suspected_anomaly",
+          "source_note": "团队手工设定，仅用于规划演示，不是录音检测结果"
+        }
+      ],
+      "expected": {
+        "status": "partial",
+        "optimized_visit_order": ["P01", "P03"],
+        "optimized_total_distance_m": 90.0,
+        "baseline_visit_order": ["P01", "P03"],
+        "baseline_total_distance_m": 90.0,
+        "unreachable_asset_ids": ["P02"]
+      }
+    }
+  ]
+}

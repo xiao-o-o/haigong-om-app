@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 
 from core import llm
@@ -37,11 +38,12 @@ TOOL_DOCS = [
         "name": "plan_asset_inspection",
         "purpose": "按检测结果排巡检优先级与路网路线，调用 D 的规划算法",
         "args": {
-            "closed_edges": "数组，元素为通道编号如 \"E04\"，可为空数组；只能取上下文中 edges 列出的编号",
-            "start_node": "起点节点，默认 \"S\"；只能取上下文中 nodes 列出的节点",
+            "closed_edges": "数组，元素为通道编号如 \"E04\"；不传表示沿用当前状态，空数组表示全部开放",
+            "start_node": "起点节点；有活动任务时必须等于任务的 current_node，不能把人员瞬移回 S",
+            "mission_action": "可选 auto / replan / create；有活动任务时通常用 auto 或 replan，create 会被拒绝",
         },
-        "returns": "status / priority / visit_order / total_distance_m / map_file",
-        "prerequisite": "必须先有检测结果（同任务前面的 detect 步骤，或上下文已有 detections）",
+        "returns": "静态规划返回 status / priority / visit_order / total_distance_m；活动任务返回 mission + 剩余 plan",
+        "prerequisite": "新建静态规划需要检测结果；活动任务重规划使用任务快照和当前位置",
     },
     {
         "name": "get_checklist",
@@ -64,6 +66,11 @@ def _system_prompt() -> str:
         "- 只调必要的工具，不要为了显得完整而调用无关工具；\n"
         "- 没有可用文件就不要规划 detect；没有检测结果就不要规划 plan；\n"
         "- 参数只能用上下文给出的编号，不得编造设备编号、通道编号或文件路径；\n"
+        "- plan 的 start_node 和 closed_edges 若用户没有明确改变，必须沿用 "
+        "current_plan_state，不要自行重置为 S 或空数组；\n"
+        "- 有 active_mission 时，重规划只能从任务的 current_node 出发，"
+        "不能修改当前位置、已完成设备或已走距离；\n"
+        "- 有 active_mission 时不要用 create 替换任务；是否新建由页面确认；\n"
         "- 如果任务与三个工具都无关，返回 {\"steps\": []}。"
     )
 
@@ -74,6 +81,27 @@ def _user_prompt(question: str, context: dict) -> str:
         for f in (context.get("files") or [])
     ]
     detections = context.get("detections") or []
+    mission = context.get("mission") if isinstance(context.get("mission"), dict) else None
+    if mission:
+        current_node = str(mission.get("current_node") or "S")
+        mission_closed = list(mission.get("closed_edges") or [])
+        mission_summary = {
+            "mission_id": mission.get("mission_id"),
+            "status": mission.get("status"),
+            "source_kind": (mission.get("source") or {}).get("kind"),
+            "current_node": current_node,
+            "pending_assets": list(mission.get("pending_assets") or []),
+            "completed_assets": list(mission.get("completed_assets") or []),
+            "unreachable_assets": list(mission.get("unreachable_assets") or []),
+            "closed_edges": mission_closed,
+            "walked_distance_m": mission.get("walked_distance_m"),
+            "remaining_distance_m": mission.get("remaining_distance_m"),
+        }
+    else:
+        current_node = str(context.get("start_node") or "S")
+        mission_closed = list(context.get("closed_edges") or [])
+        mission_summary = None
+
     ctx = {
         "assets": [
             {"asset_id": a["asset_id"], "name": a.get("name"), "criticality": a.get("criticality")}
@@ -85,6 +113,11 @@ def _user_prompt(question: str, context: dict) -> str:
         "existing_detections": {
             "count": len(detections),
             "is_mock": bool(context.get("detections_is_mock")),
+        },
+        "active_mission": mission_summary,
+        "current_plan_state": {
+            "start_node": current_node,
+            "closed_edges": mission_closed,
         },
         "runtime_mode": context.get("mode", "mock"),
     }
@@ -158,7 +191,22 @@ def _validate_plan(raw: dict, context: dict, max_steps: int) -> tuple[list[tuple
             args["asset_ids"] = picked
 
         elif tool == "plan_asset_inspection":
-            closed_raw = args_in.get("closed_edges") or []
+            # 用户没有明确给参数时，沿用当前状态；有活动任务时以任务当前位置/封路为准。
+            mission = context.get("mission") if isinstance(context.get("mission"), dict) else None
+            default_start = (
+                str(mission.get("current_node") or "S")
+                if mission
+                else str(context.get("start_node") or "S")
+            )
+            default_closed = list(
+                mission.get("closed_edges") or []
+                if mission
+                else context.get("closed_edges") or []
+            )
+            if "closed_edges" in args_in and args_in.get("closed_edges") is not None:
+                closed_raw = args_in.get("closed_edges")
+            else:
+                closed_raw = default_closed
             if not isinstance(closed_raw, list):
                 return [], "closed_edges 必须是数组"
             closed = []
@@ -166,12 +214,18 @@ def _validate_plan(raw: dict, context: dict, max_steps: int) -> tuple[list[tuple
                 cid = str(c).strip().upper()
                 if cid not in valid_edges:
                     return [], f"closed_edges 含不存在的通道：{c}"
-                closed.append(cid)
-            start = str(args_in.get("start_node") or "S").strip().upper()
+                if cid not in closed:
+                    closed.append(cid)
+            start_raw = args_in.get("start_node")
+            start = str(start_raw or default_start).strip().upper()
             if start not in valid_nodes:
                 return [], f"start_node 不存在于场景：{start}"
+            action = str(args_in.get("mission_action") or "auto").strip().lower()
+            if action not in {"auto", "replan", "create"}:
+                return [], f"mission_action 不合法：{action}"
             args["closed_edges"] = closed
             args["start_node"] = start
+            args["mission_action"] = action
 
         elif tool == "get_checklist":
             args["query"] = str(args_in.get("query") or "")
@@ -188,20 +242,86 @@ def _validate_plan(raw: dict, context: dict, max_steps: int) -> tuple[list[tuple
 # 规则版（回退用，逻辑与 v0.2 一致）
 # ---------------------------------------------------------------------------
 
-def rule_plan(question: str, context: dict) -> list[tuple[str, dict]]:
-    import re
+_ASSET_MENTION = re.compile(r"(?<![A-Za-z0-9])P\d{2}(?![0-9])", re.IGNORECASE)
+_EDGE_MENTION = re.compile(r"(?<![A-Za-z0-9])E\d{2}(?![0-9])", re.IGNORECASE)
+_START_PATTERNS = (
+    re.compile(r"从\s*([A-Za-z][A-Za-z0-9]*)\s*出发"),
+    re.compile(
+        r"从\s*([A-Za-z][A-Za-z0-9]*)\s*(?:开始|重新规划|重新|规划|走|前往)"
+    ),
+    re.compile(
+        r"起点\s*(?:节点)?\s*(?:设为|改为|改到|定在|放在|是|为)?\s*([A-Za-z][A-Za-z0-9]*)"
+    ),
+)
+_OPEN_PHRASES = (
+    "取消关闭", "解除关闭", "重新开放", "恢复开放", "恢复通行", "打开", "开放", "放行"
+)
+_CLOSE_WORDS = ("关闭", "封闭", "封路", "禁止通行", "不通")
 
-    asset_pat = re.compile(r"\bP0[1-9]\b", re.IGNORECASE)
-    edge_pat = re.compile(r"\bE(?:0[1-9]|1[0-3])\b", re.IGNORECASE)
+
+def _mentioned_start(question: str) -> str:
+    """从“从J01出发 / 起点改为J01”里取起点；没提到返回空串。"""
+    for pattern in _START_PATTERNS:
+        match = pattern.search(question)
+        if match:
+            return match.group(1).strip().upper()
+    return ""
+
+
+def _apply_edge_changes(question: str, current_closed: list[str]) -> tuple[list[str], list[str]]:
+    """按自然语言增删关闭通道。
+
+    返回 (本次提到的通道, 处理后的关闭通道)。没有提通道时保持当前状态。
+    支持“关闭E04”“重新开放E11”“取消关闭E11”等写法。
+    """
+    current = {str(edge).strip().upper() for edge in current_closed if str(edge).strip()}
+    matches = list(_EDGE_MENTION.finditer(question))
+    mentioned = sorted({m.group(0).upper() for m in matches})
+    if not matches:
+        return [], sorted(current)
+
+    explicit_open: set[str] = set()
+    explicit_close: set[str] = set()
+    for match in matches:
+        edge_id = match.group(0).upper()
+        prefix = question[max(0, match.start() - 12):match.start()]
+        if any(phrase in prefix for phrase in ("取消关闭", "解除关闭", "重新开放", "恢复开放", "恢复通行")):
+            explicit_open.add(edge_id)
+            continue
+
+        open_at = max((prefix.rfind(word) for word in _OPEN_PHRASES), default=-1)
+        close_at = max((prefix.rfind(word) for word in _CLOSE_WORDS), default=-1)
+        if open_at > close_at:
+            explicit_open.add(edge_id)
+        elif close_at >= 0:
+            explicit_close.add(edge_id)
+
+    if not explicit_open and not explicit_close:
+        # 关键词在通道编号后面（如“E04关闭”）时，按全句意图处理。
+        has_open = any(word in question for word in _OPEN_PHRASES)
+        has_close = any(word in question for word in _CLOSE_WORDS)
+        if has_open and not has_close:
+            explicit_open.update(mentioned)
+        elif has_close and not has_open:
+            explicit_close.update(mentioned)
+
+    for edge_id in explicit_open:
+        current.discard(edge_id)
+    for edge_id in explicit_close:
+        current.add(edge_id)
+    return mentioned, sorted(current)
+
+
+def rule_plan(question: str, context: dict) -> list[tuple[str, dict]]:
     file_pat = re.compile(r"[\w\u4e00-\u9fff-]+\.wav", re.IGNORECASE)
 
     pool = [str(f.get("asset_id", "")).upper() for f in (context.get("files") or []) if f.get("asset_id")]
     known = [a.upper() for a in asset_ids()]
-    named_assets = sorted({m.group(0).upper() for m in asset_pat.finditer(question)})
+    named_assets = sorted({m.group(0).upper() for m in _ASSET_MENTION.finditer(question)})
 
     # 点了不存在的设备编号（如 P99）：直接把编号交给工具，由工具如实报错，
     # 不静默忽略、也不替换成别的设备。
-    mentioned = sorted({m.group(0).upper() for m in re.finditer(r"\bP\d{2}\b", question, re.IGNORECASE)})
+    mentioned = sorted({m.group(0).upper() for m in _ASSET_MENTION.finditer(question)})
     unknown_mentioned = [a for a in mentioned if a not in known]
     if unknown_mentioned:
         return [("detect_assets_audio", {"asset_ids": unknown_mentioned})]
@@ -221,11 +341,41 @@ def rule_plan(question: str, context: dict) -> list[tuple[str, dict]]:
     # 已有检测结果、又没点名新设备时，不重复检测：通道变化只需重规划
     if context.get("detections") and not named_assets:
         want_detect = False
-    want_plan = any(k in question for k in ("巡检", "规划", "路线", "计划"))
+
+    mission = context.get("mission") if isinstance(context.get("mission"), dict) else None
+    current_start = (
+        str(mission.get("current_node") or "S")
+        if mission
+        else str(context.get("start_node") or "S")
+    ).strip().upper()
+    current_closed = [
+        str(e).strip().upper()
+        for e in (
+            mission.get("closed_edges") if mission else context.get("closed_edges")
+        ) or []
+    ]
+    named_start = _mentioned_start(question)
+    start_node = named_start or current_start
+    _, next_closed = _apply_edge_changes(question, current_closed)
+    edge_changed = sorted(next_closed) != sorted(current_closed)
+
+    create_words = ("新建", "创建", "新任务", "替换任务", "开始新")
+    wants_create = any(word in question for word in create_words)
+    want_plan = any(k in question for k in ("巡检", "规划", "路线", "计划")) or wants_create
+    if edge_changed and (context.get("detections") or mission):
+        # “关闭E04”“重新开放E11”本身就意味着按新通道状态重算路线
+        want_plan = True
     want_doc = any(
         k in question
         for k in ("检查资料", "资料", "清单", "标准", "规范", "复核", "流程", "要求", "注意事项")
     )
+
+    if wants_create:
+        mission_action = "create"
+    elif mission:
+        mission_action = "replan"
+    else:
+        mission_action = "auto"
 
     plans: list[tuple[str, dict]] = []
     if want_detect and detect_ids:
@@ -233,7 +383,11 @@ def rule_plan(question: str, context: dict) -> list[tuple[str, dict]]:
     if want_plan:
         plans.append((
             "plan_asset_inspection",
-            {"closed_edges": [m.group(0).upper() for m in edge_pat.finditer(question)]},
+            {
+                "closed_edges": next_closed,
+                "start_node": start_node,
+                "mission_action": mission_action,
+            },
         ))
     if want_doc:
         doc_query = next(

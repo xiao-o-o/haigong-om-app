@@ -82,6 +82,19 @@ def route_renderer():
     return _render
 
 
+@lru_cache(maxsize=1)
+def comparison_planner():
+    """返回 D 的 compare_inspection_plans（固定顺序 vs 优化方案对照）。
+
+    签名 (detection_results, start_node="S", closed_edges=None, output_dir="runs")。
+    """
+    try:
+        from spatial_module.plan import compare_inspection_plans
+    except Exception as exc:
+        raise ModuleUnavailable(f"D 案例对照模块无法加载：{type(exc).__name__}: {exc}") from exc
+    return compare_inspection_plans
+
+
 # ---------------------------------------------------------------------------
 # 场景数据（供页面下拉，不写死编号）
 # ---------------------------------------------------------------------------

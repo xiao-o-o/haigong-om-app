@@ -55,8 +55,13 @@ class AgentResult:
     calls_used: int = 0
     budget_exhausted: bool = False
     detections: list[dict] = field(default_factory=list)
+    detections_attempted: bool = False
     plan: dict | None = None
+    plan_attempted: bool = False
     plan_start_node: str = "S"
+    plan_closed_edges: list[str] = field(default_factory=list)
+    mission: dict | None = None
+    mission_attempted: bool = False
     planner: str = "rule"
     planner_note: str = ""
     run_id: str = ""
@@ -65,7 +70,10 @@ class AgentResult:
 
 def _dispatch(tool_name: str, args: dict, mode: str | None, state: dict) -> ToolResult:
     if tool_name == "detect_assets_audio":
-        # 模型只给编号；路径来自页面送检文件（state["files"]），不经模型
+        # 模型只给编号；路径来自页面送检文件（state["files"]），不经模型。
+        # 有活动任务时，任何一次新检测都不能悄悄套到旧任务上。
+        if state.get("mission"):
+            state["mission_stale"] = True
         tr = detect_assets_audio(
             asset_ids=args.get("asset_ids") or [],
             files=state.get("files") or [],
@@ -80,9 +88,13 @@ def _dispatch(tool_name: str, args: dict, mode: str | None, state: dict) -> Tool
         detections = state.get("detections") or []
         return plan_asset_inspection(
             detection_results=detections,
-            closed_edges=args.get("closed_edges") or [],
-            start_node=args.get("start_node") or "S",
+            closed_edges=args.get("closed_edges"),
+            start_node=args.get("start_node"),
             input_is_mock=bool(state.get("detections_is_mock", mode == "mock")),
+            mission=state.get("mission"),
+            mission_action=args.get("mission_action") or "auto",
+            mission_stale=bool(state.get("mission_stale")),
+            source_signature=str(state.get("detection_signature") or ""),
         )
 
     if tool_name == "get_checklist":
@@ -107,6 +119,15 @@ def _summarize(tr: ToolResult) -> str:
 
     if tr.tool == "plan_asset_inspection":
         d = tr.data or {}
+        if d.get("mode") == "mission":
+            mission = d.get("mission") or {}
+            return (
+                f"任务 {mission.get('status', '?')}，当前位置 {mission.get('current_node', '?')}，"
+                f"已走 {mission.get('walked_distance_m', '?')} m，"
+                f"待检 {'、'.join(mission.get('pending_assets') or []) or '无'}，"
+                f"剩余 {mission.get('remaining_distance_m', '?')} m，"
+                f"不可达 {len(mission.get('unreachable_assets') or [])} 台"
+            )
         order = "→".join(d.get("visit_order") or []) or "无"
         return (
             f"规划状态 {d.get('status', '?')}，访问顺序 {order}，"
@@ -163,10 +184,17 @@ def run_agent(
     """
     context = dict(context or {})
     context.setdefault("mode", mode or "mock")
+    context.setdefault("start_node", "S")
+    context.setdefault("closed_edges", [])
     state: dict = {
         "detections": list(context.get("detections") or []),
         "detections_is_mock": bool(context.get("detections_is_mock", False)),
         "files": list(context.get("files") or []),
+        "start_node": context.get("start_node") or "S",
+        "closed_edges": list(context.get("closed_edges") or []),
+        "mission": context.get("mission") if isinstance(context.get("mission"), dict) else None,
+        "mission_stale": bool(context.get("mission_stale", False)),
+        "detection_signature": str(context.get("detection_signature") or ""),
     }
 
     result = AgentResult(answer="")
@@ -188,6 +216,10 @@ def run_agent(
             "rounds": res.rounds_used,
             "tool_calls": res.calls_used,
             "budget_exhausted": res.budget_exhausted,
+            "plan_start_node": res.plan_start_node,
+            "plan_closed_edges": res.plan_closed_edges,
+            "mission_id": (res.mission or {}).get("mission_id"),
+            "mission_status": (res.mission or {}).get("status"),
             "steps": [
                 {
                     "round": s.round_no,
@@ -218,8 +250,14 @@ def run_agent(
     result.planner_note = outcome.note
     plans = outcome.steps
 
-    # 只说了「规划」但没有任何检测结果可复用 → 直接给出可执行提示，不臆造目标
-    if plans and plans[0][0] == "plan_asset_inspection" and not state["detections"]:
+    # 只说了「规划」但没有任何检测结果可复用 → 直接给出可执行提示，不臆造目标。
+    # 有活动任务时允许只凭任务快照重规划剩余目标。
+    if (
+        plans
+        and plans[0][0] == "plan_asset_inspection"
+        and not state["detections"]
+        and not state["mission"]
+    ):
         result.answer = (
             "还没有可用的检测结果。巡检规划只按 A 的检测结果确定目标，"
             "不会凭设备清单猜测。请先选择音频并执行检测，再说「做成巡检计划」。"
@@ -258,21 +296,52 @@ def run_agent(
             )
         )
 
-        if tr.ok and tool_name == "plan_asset_inspection":
-            result.plan = tr.data
-            result.plan_start_node = args.get("start_node") or "S"
-        if tr.ok and tool_name == "detect_assets_audio":
-            result.detections = state["detections"]
+        if tool_name == "detect_assets_audio":
+            result.detections_attempted = True
+            if tr.ok:
+                result.detections = state["detections"]
+
+        if tool_name == "plan_asset_inspection":
+            result.plan_attempted = True
+            if state.get("mission") or (args.get("mission_action") == "create"):
+                result.mission_attempted = True
+            if tr.ok:
+                payload = tr.data if isinstance(tr.data, dict) else {}
+                if payload.get("mode") == "mission":
+                    result.mission = payload.get("mission")
+                    result.plan = payload.get("plan")
+                    mission_state = result.mission or {}
+                    result.plan_start_node = str(
+                        mission_state.get("current_node") or "S"
+                    )
+                    result.plan_closed_edges = list(
+                        mission_state.get("closed_edges") or []
+                    )
+                    state["mission"] = result.mission
+                else:
+                    result.plan = tr.data
+                    result.plan_start_node = (
+                        (tr.data or {}).get("start_node")
+                        or args.get("start_node")
+                        or "S"
+                    )
+                    result.plan_closed_edges = list(
+                        (tr.data or {}).get("closed_edges")
+                        if "closed_edges" in (tr.data or {})
+                        else (args.get("closed_edges") or [])
+                    )
 
         if not tr.ok:
             result.answer = (
                 f"【失败】第 {round_no} 步 {tool_name} 调用失败：{str(tr.message).rstrip('。')}。"
                 "已停止后续步骤，不会用模拟数据兜底或编造结果。"
             )
-            result.detections = state["detections"]
+            if not (result.detections_attempted and result.detections):
+                result.detections = []
             return _finish(result)
 
-    result.detections = state["detections"]
+    if result.detections_attempted:
+        result.detections = state["detections"]
     body = _compose_answer(result.steps)
     if result.budget_exhausted:
         result.answer = "【部分完成】已达单任务预算上限，提前停止。\n" + body

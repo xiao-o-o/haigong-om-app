@@ -37,7 +37,10 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from spatial_module.visualize import render_route  # noqa: E402
+from spatial_module.visualize import (  # noqa: E402
+    render_plan_comparison,
+    render_route,
+)
 
 SCHEMA_VERSION = "1.0"
 STATUS_OK = "ok"
@@ -683,12 +686,18 @@ def _invalid_result(notes: list[str]) -> dict[str, Any]:
     return {
         "schema_version": SCHEMA_VERSION,
         "status": STATUS_INVALID,
+        "start_node": None,
+        "closed_edges": [],
+        "target_asset_ids": [],
+        "reachable_asset_ids": [],
         "priority": [],
         "visit_order": [],
         "route_nodes": [],
         "total_distance_m": None,
         "unreachable_asset_ids": [],
         "map_file": None,
+        "baseline": None,
+        "timing": None,
         "notes": [str(note) for note in notes],
     }
 
@@ -724,14 +733,46 @@ def _create_run_directory(output_dir: str | Path) -> Path:
     return run_dir
 
 
-def _render_map(data: PlanData, output_dir: str | Path) -> str:
-    run_dir = _create_run_directory(output_dir)
-    relative = (run_dir / "route.png").relative_to(ROOT).as_posix()
+def _checked_png_path(returned: Any, label: str) -> Path:
+    """检查绘图函数返回的路径确实位于项目内、存在且是 PNG。"""
+    returned_path = Path(str(returned))
+    if returned_path.is_absolute():
+        try:
+            returned_path = returned_path.resolve().relative_to(ROOT)
+        except ValueError as exc:
+            raise PlanSystemError(
+                f"{label}返回了项目根目录之外的路径：{returned}"
+            ) from exc
+    absolute_path = (ROOT / returned_path).resolve()
 
+    if not absolute_path.is_relative_to(ROOT):
+        raise PlanSystemError(f"{label}路径越出项目根目录：{returned}")
+    if absolute_path.suffix.lower() != ".png":
+        raise PlanSystemError(f"{label}返回的不是 PNG：{returned}")
+    if not absolute_path.is_file():
+        raise PlanSystemError(f"{label}声称成功，但文件不存在：{returned}")
+
+    try:
+        signature = absolute_path.read_bytes()[:8]
+    except OSError as exc:
+        raise PlanSystemError(f"无法读取{label}：{exc}") from exc
+    if signature != b"\x89PNG\r\n\x1a\n":
+        raise PlanSystemError(f"{label}不是有效 PNG：{returned}")
+
+    return returned_path
+
+
+def _render_route_in_dir(
+    data: PlanData,
+    run_dir: Path,
+    route_nodes: list[str],
+    filename: str,
+) -> str:
+    relative = (run_dir / filename).relative_to(ROOT).as_posix()
     try:
         returned = render_route(
             "scene",
-            data.route_nodes,
+            route_nodes,
             relative,
             closed_edges=data.closed_edges,
         )
@@ -739,32 +780,12 @@ def _render_map(data: PlanData, output_dir: str | Path) -> str:
         raise PlanSystemError(
             f"路线图生成失败（{relative}）：{type(exc).__name__}: {exc}"
         ) from exc
+    return _checked_png_path(returned, "路线图").as_posix()
 
-    returned_path = Path(str(returned))
-    if returned_path.is_absolute():
-        try:
-            returned_path = returned_path.resolve().relative_to(ROOT)
-        except ValueError as exc:
-            raise PlanSystemError(
-                f"绘图函数返回了项目根目录之外的路径：{returned}"
-            ) from exc
-    absolute_path = (ROOT / returned_path).resolve()
 
-    if not absolute_path.is_relative_to(ROOT):
-        raise PlanSystemError(f"地图路径越出项目根目录：{returned}")
-    if absolute_path.suffix.lower() != ".png":
-        raise PlanSystemError(f"绘图函数返回的不是 PNG：{returned}")
-    if not absolute_path.is_file():
-        raise PlanSystemError(f"绘图函数声称成功，但文件不存在：{returned}")
-
-    try:
-        signature = absolute_path.read_bytes()[:8]
-    except OSError as exc:
-        raise PlanSystemError(f"无法读取生成的路线图：{exc}") from exc
-    if signature != b"\x89PNG\r\n\x1a\n":
-        raise PlanSystemError(f"生成的路线图不是有效 PNG：{returned}")
-
-    return returned_path.as_posix()
+def _render_map(data: PlanData, output_dir: str | Path) -> str:
+    run_dir = _create_run_directory(output_dir)
+    return _render_route_in_dir(data, run_dir, data.route_nodes, "route.png")
 
 
 def _plan_inspection_for_scene(
@@ -797,12 +818,27 @@ def _plan_inspection_for_scene(
     return {
         "schema_version": SCHEMA_VERSION,
         "status": status,
+        "start_node": data.start,
+        "closed_edges": data.closed_edges,
+        "target_asset_ids": data.targets,
+        "reachable_asset_ids": data.reachable,
         "priority": data.priority,
         "visit_order": data.visit_order,
         "route_nodes": data.route_nodes,
         "total_distance_m": round(float(data.total_distance_m), 6),
         "unreachable_asset_ids": data.unreachable,
         "map_file": map_file,
+        "baseline": {
+            "visit_order": data.baseline_order,
+            "route_nodes": data.baseline_route_nodes,
+            "total_distance_m": round(float(data.baseline_total_distance_m), 6),
+            "calculation_ms": round(float(data.baseline_elapsed_ms), 3),
+        },
+        "timing": {
+            "optimization_ms": round(float(data.optimized_elapsed_ms), 3),
+            "baseline_calculation_ms": round(float(data.baseline_elapsed_ms), 3),
+            "note": "单次本机运行耗时，不是可靠的性能基准。",
+        },
         "notes": data.notes,
     }
 
@@ -831,6 +867,8 @@ def plan_inspection(
     dict
         固定包含 schema_version、status、priority、visit_order、
         route_nodes、total_distance_m、unreachable_asset_ids、map_file、notes。
+        兼容扩展字段：start_node、closed_edges、target_asset_ids、
+        reachable_asset_ids、baseline（固定顺序基线）、timing（单次耗时说明）。
         status 为 ok / no_targets / partial / invalid_input。
         invalid_input 时 total_distance_m、map_file 为 None，其余列表为空。
         所有数值有限，可直接 json.dumps(..., allow_nan=False)。
@@ -842,3 +880,187 @@ def plan_inspection(
         output_dir,
         scene_dir=ROOT / "scene",
     )
+
+
+def _invalid_compare_result(notes: list[str]) -> dict[str, Any]:
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "status": STATUS_INVALID,
+        "start_node": None,
+        "closed_edges": [],
+        "target_asset_ids": [],
+        "reachable_asset_ids": [],
+        "unreachable_asset_ids": [],
+        "priority": [],
+        "optimized": None,
+        "baseline": None,
+        "comparison": None,
+        "map_files": {},
+        "notes": [str(note) for note in notes],
+        "timing": None,
+    }
+
+
+def _comparison_block(
+    baseline_total: float,
+    optimized_total: float,
+    baseline_order: list[str],
+    optimized_order: list[str],
+) -> dict[str, Any]:
+    """计算距离差和改善比例；基线为 0 时比例明确写不适用。"""
+    difference = float(baseline_total) - float(optimized_total)
+    baseline_zero = abs(float(baseline_total)) <= DISTANCE_TOL
+
+    if baseline_zero:
+        ratio: float | None = None
+        percent: float | None = None
+        ratio_text = "不适用（基线距离为0）"
+    else:
+        ratio = difference / float(baseline_total)
+        percent = ratio * 100.0
+        ratio_text = f"{percent:.2f}%"
+
+    if abs(difference) <= DISTANCE_TOL:
+        change = "same"
+        summary = "两种顺序总距离相同。"
+    elif difference > 0:
+        change = "shorter"
+        summary = f"优化方案比固定顺序少走 {difference:.6g} m。"
+    else:
+        change = "longer"
+        summary = f"优化方案比固定顺序多走 {abs(difference):.6g} m。"
+
+    if baseline_zero:
+        summary += "基线距离为 0，改善比例不适用。"
+    return {
+        "distance_difference_m": round(difference, 6),
+        "improvement_ratio": round(ratio, 6) if ratio is not None else None,
+        "improvement_percent": round(percent, 2) if percent is not None else None,
+        "improvement_text": ratio_text,
+        "baseline_zero": baseline_zero,
+        "distance_change": change,
+        "same_order": list(baseline_order) == list(optimized_order),
+        "summary": summary,
+    }
+
+
+def compare_inspection_plans(
+    detection_results,
+    start_node="S",
+    closed_edges=None,
+    output_dir="runs",
+) -> dict:
+    """在同一批输入上比较“固定顺序基线”和“距离优化方案”。
+
+    两种方案共用起点、同一批可达目标、同样的重要等级约束、同样的开放通道，
+    且都不强制返回起点。距离全部由 D 的路网最短路实际计算，不写死。
+
+    除两张路线图外，还调用 C 的 render_plan_comparison 生成距离对比图。
+    计算耗时与绘图耗时分别记录；单次耗时不能当作性能基准。
+    """
+    calculation_started = time.perf_counter()
+    try:
+        data = _analyse_plan(
+            detection_results,
+            start_node,
+            closed_edges,
+            scene_dir=ROOT / "scene",
+        )
+    except (SceneDataError, PlanInputError) as exc:
+        return _invalid_compare_result([str(exc)])
+    calculation_total_ms = (time.perf_counter() - calculation_started) * 1000.0
+
+    if not data.targets:
+        status = STATUS_NO_TARGETS
+    elif data.unreachable:
+        status = STATUS_PARTIAL
+    else:
+        status = STATUS_OK
+
+    run_dir = _create_run_directory(output_dir)
+
+    drawing_started = time.perf_counter()
+    optimized_map = _render_route_in_dir(
+        data, run_dir, data.route_nodes, "route_optimized.png"
+    )
+    optimized_map_ms = (time.perf_counter() - drawing_started) * 1000.0
+
+    drawing_started = time.perf_counter()
+    baseline_map = _render_route_in_dir(
+        data, run_dir, data.baseline_route_nodes, "route_fixed.png"
+    )
+    baseline_map_ms = (time.perf_counter() - drawing_started) * 1000.0
+
+    chart_relative = (run_dir / "distance_comparison.png").relative_to(ROOT).as_posix()
+    drawing_started = time.perf_counter()
+    try:
+        returned_chart = render_plan_comparison(
+            chart_relative,
+            {
+                "visit_order": data.baseline_order,
+                "total_distance_m": data.baseline_total_distance_m,
+            },
+            {
+                "visit_order": data.visit_order,
+                "total_distance_m": data.total_distance_m,
+            },
+            title=f"固定顺序与优化方案距离对比 · {data.start} 起点",
+            unreachable=data.unreachable,
+        )
+    except Exception as exc:
+        raise PlanSystemError(
+            f"距离对比图生成失败（{chart_relative}）：{type(exc).__name__}: {exc}"
+        ) from exc
+    comparison_chart = _checked_png_path(returned_chart, "距离对比图").as_posix()
+    comparison_chart_ms = (time.perf_counter() - drawing_started) * 1000.0
+
+    drawing_total_ms = optimized_map_ms + baseline_map_ms + comparison_chart_ms
+    comparison = _comparison_block(
+        data.baseline_total_distance_m,
+        data.total_distance_m,
+        data.baseline_order,
+        data.visit_order,
+    )
+
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "status": status,
+        "start_node": data.start,
+        "closed_edges": data.closed_edges,
+        "target_asset_ids": data.targets,
+        "reachable_asset_ids": data.reachable,
+        "unreachable_asset_ids": data.unreachable,
+        "priority": data.priority,
+        "optimized": {
+            "visit_order": data.visit_order,
+            "route_nodes": data.route_nodes,
+            "total_distance_m": round(float(data.total_distance_m), 6),
+            "map_file": optimized_map,
+        },
+        "baseline": {
+            "visit_order": data.baseline_order,
+            "route_nodes": data.baseline_route_nodes,
+            "total_distance_m": round(float(data.baseline_total_distance_m), 6),
+            "map_file": baseline_map,
+        },
+        "comparison": comparison,
+        "map_files": {
+            "optimized_route": optimized_map,
+            "fixed_route": baseline_map,
+            "comparison_chart": comparison_chart,
+        },
+        "notes": data.notes,
+        "timing": {
+            "calculation_total_ms": round(calculation_total_ms, 3),
+            "optimization_ms": round(float(data.optimized_elapsed_ms), 3),
+            "baseline_calculation_ms": round(float(data.baseline_elapsed_ms), 3),
+            "drawing_total_ms": round(drawing_total_ms, 3),
+            "optimized_map_ms": round(optimized_map_ms, 3),
+            "baseline_map_ms": round(baseline_map_ms, 3),
+            "comparison_chart_ms": round(comparison_chart_ms, 3),
+            "note": (
+                "计算与绘图耗时分别记录，均为单次本机运行值；"
+                "受首次加载、字体缓存、磁盘与图像大小影响，不是可靠性能基准。"
+            ),
+        },
+    }

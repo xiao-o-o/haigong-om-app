@@ -22,19 +22,24 @@ Agent 的决策器可切换：**LLM 规划（带白名单校验）/ 规则版**�
 
 ## 数据来源与声明（公开仓库必读）
 
-| 内容 | 来源 | 性质 |
+| 内容 | 当前口径 | 性质 |
 | --- | --- | --- |
-| 检测模型 `models/pump_v1.joblib` | MIMII Dataset（Hitachi, Ltd.），水泵类正常/异常录音训练 | **公开工业数据集** |
-| `samples/*.wav` | MIMII 公开样本片段，每段 10 s / 16 kHz / 16 bit | **公开工业数据集** |
+| 检测模型 `models/pump_v1.joblib` | 团队此前的**合成演示包** | **合成演示** |
+| `samples/*.wav` | 团队此前的**合成演示录音**，每段 10 s / 16 kHz / 16 bit | **合成演示** |
 | `scene/*.csv`（节点、通道、设备编号、距离） | 团队自拟 | **模拟厂区** |
 | `knowledge/checklist.json` 中 K-001、K-002 | MIMII、DCASE 2020 Task 2 官方说明 | 公开资料 |
 | `knowledge/checklist.json` 中 K-003 至 K-005 | 团队设定 | **自拟规则** |
 
-MIMII Dataset 由 Hitachi, Ltd. 以 **CC BY-SA 4.0** 发布，引用与许可全文：
-<https://zenodo.org/record/3384387>。再分发时须保留署名与许可声明。
-本仓库的 `samples/` 已按该要求附 `samples/README.md`。
+**来源边界（2026-10-24 核对）**
 
-引用格式：
+`models/model_config.json` 里的 `dataset` 字段仍写着 MIMII，但同文件的
+`data_root` 是 `data\demo_raw`，训练/验证样本数为 24 / 8，仓库内也没有真实数据训练记录。
+因此按团队当前口径：**当前模型和两条录音按合成演示说明，不能据此声称已经完成 MIMII 真实数据训练，
+也不能用于评价声音检测准确率。** 本轮不改动模型、训练配置和录音来制造“来源已更新”的假象。
+
+MIMII Dataset（Hitachi, Ltd.，CC BY-SA 4.0，<https://zenodo.org/record/3384387>）
+是后续**计划采用**的公开数据集参考。等 A 提供新的训练记录、数据清单和模型后，
+再按实际来源恢复/补充许可与引用说明。引用格式：
 
 > H. Purohit, R. Tanabe, K. Ichige, T. Endo, Y. Nikaido, K. Suefusa, and Y. Kawaguchi,
 > “MIMII Dataset: Sound Dataset for Malfunctioning Industrial Machine Investigation and Inspection,”
@@ -44,7 +49,7 @@ MIMII Dataset 由 Hitachi, Ltd. 以 **CC BY-SA 4.0** 发布，引用与许可全
 
 1. 检测分数是相对异常程度，**不是故障概率**，也不判断具体损坏部件；
 2. `scene/` 是模拟厂区，路线与距离仅用于演示调度逻辑，不构成实际作业指导；
-3. 模型只覆盖 MIMII 采集的水泵机型与录音条件，换机型须重新采集正常样本评估；
+3. 当前模型/录音按合成演示口径，换机型或换真实数据须由 A 重新评估并记录；
 4. 本仓库为课程团队共同成果，仅用于课程展示；成员分工见 `docs/` 与实施手册。
 
 ## 快速开始（Windows）
@@ -81,10 +86,11 @@ python -m venv .venv
 | 项 | 值 | 说明 |
 | --- | --- | --- |
 | 实施手册要求 | 3.12 | 同进程 import 三家模块 |
-| 本机开发/实测 | 3.13.14 | 全部测试结论都在这个版本上得出 |
+| 本机本轮实测 | 3.13.13 | 项目独立 `.venv`；全部 C/D 检查结论在这个版本上得出 |
 | `runtime.txt` 当前值 | python-3.13 | 与实测环境一致，不改动 |
 
-本机没有 3.12 环境，**没有在 3.12 上实测过**，不写"应该可以"这类结论。
+系统只注册了 Python 3.12.8，没有找到 3.13；本轮用 `uv` 下载 Python 3.13.13
+并在项目内创建 `.venv`。旧的 3.13.14 记录是上一轮环境，本轮没有复测 3.13.14。
 若团队统一到 3.12，先在目标版本上跑这一条，通过再改 `runtime.txt`：
 
 ```bash
@@ -105,6 +111,31 @@ python -c "import sys, audio_module.infer as m; print(sys.version); print(m.anal
 
 「⑤ Agent 助手」可一句话串起两步：`检测 P01 和 P04，然后关闭 E04 出一条巡检路线`。
 
+### C/D 联合优化（第一轮 + 第二轮）
+
+补丁标识：`CD-R2-20261025`。
+
+第一轮：
+
+- 「③ 巡检规划」新增「规划案例对照（模拟输入）」：读取 `examples/cd_cases.json`，
+  实际调用 D 计算固定顺序与优化方案，C 画两张路线图和一张对比图。
+- 模拟案例与录音检测状态分开保存，不覆盖 A 的检测结果，也不会写进录音检测报告。
+- 命令行检查：`.venv\Scripts\python.exe check_cd.py`；
+  案例输出：`.venv\Scripts\python.exe examples\run_cd_cases.py`。
+
+第二轮：
+
+- 新增「巡检执行（模拟）」：记录当前位置、已完成设备、待检设备、累计已走距离和剩余路线。
+- 可以按相邻开放通道一步一步走；到达设备节点后由人员确认完成，不自动确认，不重复统计。
+- 支持从当前位置关闭/重新开放通道并重规划；已走距离和已完成设备不会被重置。
+- 全部待检目标都不可达时显示“受阻”，不会显示“巡检已完成”；只有全部目标确认后才完成。
+- 支持从录音检测结果或 C1/C2/C3 手工模拟案例创建任务，两种来源分开保存，可导出任务 JSON。
+- 第二轮检查：`.venv\Scripts\python.exe check_cd_mission.py`。
+- 任务范围、修改记录、验证结果：`docs/CD_TASK.md`、`docs/CD_WORKLOG.md`；
+  精确依赖：`docs/CD_ENV_LOCK_20261025.txt`；
+  给 B 的交接说明：`docs/CD_HANDOFF.md`；
+  C1 演示步骤：`docs/CD_DEMO_C1.md`。
+
 ## 目录结构
 
 ```
@@ -120,8 +151,15 @@ core/
   runlog.py             运行日志：run_id、脱敏、参数摘要
   config.py             运行模式等配置（环境变量注入）
   api_client.py         HTTP 客户端（当前未使用，保留以备后续改为服务化部署）
-audio_module/  models/  samples/     A 交付（原样）
-spatial_module/  scene/              D + C 交付（原样）
+audio_module/  models/  samples/     A 交付（本轮未改动）
+spatial_module/  scene/              C/D（兼容扩展，公开规划/绘图入口保留）
+spatial_module/mission.py 巡检执行任务：行走、确认、从当前位置重规划、导出
+core/cd_state.py        输入指纹、检测结果指纹与规划上下文比较
+core/cd_cases.py        模拟规划案例读取
+examples/cd_cases.json  三个手工设定的规划案例
+examples/run_cd_cases.py 案例运行脚本（JSON / CSV / 三张图）
+check_cd.py             第一轮 C/D 检查入口（23 项）
+check_cd_mission.py     第二轮巡检执行检查入口（23 项）
 knowledge/checklist.json  检查条目（source_id/标题/URL/适用条件/检查建议）
 check_llm.py            LLM 接入自检（配置 / 连通 / 规划 / 越权拦截四步）
 runs/                   运行时产物：上传暂存、频谱图、路线图、<run_id>/run_log.json
@@ -134,8 +172,21 @@ runs/                   运行时产物：上传暂存、频谱图、路线图�
 | 工具 | 入参 | 返回 | 谁提供数据 |
 | --- | --- | --- | --- |
 | `detect_assets_audio(asset_ids, files=None)` | 只接受**设备编号数组**，如 `["P01","P04"]` | `requested_asset_ids` / `missing_asset_ids` / `results`（沿用 A 字段） | A `analyze_audio` |
-| `plan_asset_inspection(detection_results, closed_edges, start_node)` | 必须传真实检测结果，空则报错 | D 的原始返回（`status`/`priority`/`visit_order`/`total_distance_m`/`map_file`…） | D `plan_inspection` |
+| `plan_asset_inspection(detection_results=None, closed_edges=None, start_node=None, input_is_mock=False, mission=None, mission_action="auto", mission_stale=False, source_signature="")` | 旧三参数调用不变；有活动任务时传 `mission`，返回任务剩余规划 | 静态规划返回 D 原始字段；任务模式返回 `{mode, action, mission, plan}` | D `plan_inspection` / `spatial_module.mission` |
 | `get_checklist(query)` | 关键词，可空 | `items`（`source_id`/`title`/`url`/`conditions`/`advice`/`kind`）+ `sources` | knowledge/checklist.json |
+
+真实签名（本轮用 `inspect.signature` 核对）：
+
+```python
+plan_inspection(detection_results, start_node="S", closed_edges=None, output_dir="runs") -> dict
+plan_asset_inspection(
+    detection_results=None, closed_edges=None, start_node=None, input_is_mock=False,
+    mission=None, mission_action="auto", mission_stale=False, source_signature="",
+) -> ToolResult
+```
+
+`plan_asset_inspection` 的前三个旧参数仍按原顺序兼容；`mission` 之后的参数都有默认值。
+没有活动任务时它仍返回 D 的静态规划字段；有活动任务时返回任务模式的 `mission + plan`。
 
 三条边界，改代码时不要破：
 
@@ -314,6 +365,7 @@ python -m streamlit run app.py --server.port $PORT --server.address 0.0.0.0 --se
 - [x] Agent 决策器接入 LLM（白名单校验 + 规则版回退；未配置时只提供规则版）
 - [x] 每次运行独立 run_id + 日志脱敏落盘
 - [x] 可下载 Markdown 报告（结果 / 模拟条件 / 人工复核建议分节）
+- [x] 第二轮巡检执行（模拟）：当前位置、已完成/待检、封路重规划、已走/剩余距离、任务 JSON
 - [x] 知识库结构化 5 条（公开资料 + 团队设定分开标注）
 - [ ] Python 3.12 实测（本机只有 3.13，见「Python 版本口径」）
 - [x] LLM 决策器的真实输出采集（三组，见 `docs/prompts_and_outputs.md`）
@@ -339,5 +391,6 @@ python -m streamlit run app.py --server.port $PORT --server.address 0.0.0.0 --se
 2. 上传音频只用于检测，不触发任何训练；
 3. 模型缺失 / 调用失败直接报错，绝不当成「设备正常」，绝不用模拟数据兜底；
 4. 工具调用次数多 ≠ 质量好，预算（6 轮 / 12 次）是硬约束；
-5. 不改 A / C / D 的模块代码，问题列复现步骤交回负责人；
+5. A 的 `audio_module/`、`models/`、`samples/` 本轮保持原样；C/D 只做兼容扩展，
+   公开入口 `render_route` 与 `plan_inspection` 保留，改动记录见 `docs/CD_WORKLOG.md`；
 6. 分数是相对异常程度，不是故障概率，也不判断具体损坏部件。

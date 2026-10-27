@@ -247,23 +247,106 @@ def _count_abnormal(results: list[dict]) -> int:
 def plan_asset_inspection(
     detection_results: list[dict] | None = None,
     closed_edges: list[str] | None = None,
-    start_node: str = "S",
+    start_node: str | None = None,
     input_is_mock: bool = False,
+    mission: dict | None = None,
+    mission_action: str = "auto",
+    mission_stale: bool = False,
+    source_signature: str = "",
 ) -> ToolResult:
-    """按 A 的检测结果规划巡检顺序与路网路线。
+    """按检测结果规划巡检路线；活动任务存在时改为“从当前位置重规划剩余任务”。
 
     参数
     ----
     detection_results : list[dict]
-        A 返回的结果列表（必须有 asset_id 和 status）。**不能为空**：
-        规划只认检测结果，不按设备清单猜目标。
+        A 返回的结果列表（必须有 asset_id 和 status）。新建任务时必须非空。
     closed_edges : list[str] | None
-        本次临时关闭的通道编号（E01~E13）。
-    start_node : str
-        起点节点，默认 "S"。
+        本次临时关闭的通道编号。活动任务下 None 表示沿用任务当前封路状态。
+    start_node : str | None
+        起点节点；None 时旧调用默认 "S"，活动任务下沿用任务当前位置。
     input_is_mock : bool
         入参是否来自模拟检测，用于页面如实标注。
+    mission : dict | None
+        当前会话的巡检任务。**模型不能用它之外的参数改动当前位置或已完成设备。**
+    mission_action : str
+        auto / replan / create。auto：有任务就重规划，没有任务就旧式静态规划。
+    mission_stale : bool
+        关联录音输入是否已变化；失效任务拒绝继续重规划。
+    source_signature : str
+        新建任务时保存的检测输入指纹。
     """
+    action = str(mission_action or "auto").strip().lower()
+    if action not in {"auto", "replan", "create"}:
+        return ToolResult(
+            "plan_asset_inspection", False, input_is_mock,
+            message=f"未知 mission_action：{mission_action!r}",
+        )
+
+    if mission is not None:
+        from spatial_module.mission import MissionError, replan_mission
+
+        if action == "create":
+            return ToolResult(
+                "plan_asset_inspection", False, input_is_mock,
+                message=(
+                    "已有活动巡检任务，Agent 不能直接替换。"
+                    "请先在「③ 巡检规划」页面确认结束/替换当前任务；"
+                    "若只是继续执行，请说“重新规划”。"
+                ),
+            )
+        if mission_stale:
+            return ToolResult(
+                "plan_asset_inspection", False, input_is_mock,
+                message=(
+                    "关联录音检测输入已变化，当前任务已失效。"
+                    "请先重新检测并在页面新建任务，不能把新数据套到旧任务上。"
+                ),
+            )
+        current = str(mission.get("current_node") or "")
+        requested_start = str(start_node).strip().upper() if start_node else ""
+        if requested_start and requested_start != current:
+            return ToolResult(
+                "plan_asset_inspection", False, input_is_mock,
+                message=(
+                    f"起点冲突：活动任务当前位置是 {current}，"
+                    f"请求的起点是 {requested_start}。"
+                    "不能把人员瞬移回起点；请使用任务当前位置重新规划。"
+                ),
+            )
+        try:
+            new_mission = replan_mission(
+                mission,
+                closed_edges=closed_edges,
+                output_dir="runs/missions",
+                reason="agent",
+            )
+        except MissionError as exc:
+            return ToolResult(
+                "plan_asset_inspection", False, input_is_mock,
+                message=f"活动任务重规划失败：{exc}",
+            )
+        except Exception as exc:
+            return ToolResult(
+                "plan_asset_inspection", False, input_is_mock,
+                message=f"活动任务重规划失败（{type(exc).__name__}）：{exc}",
+            )
+        is_mock = bool((new_mission.get("source") or {}).get("is_mock", input_is_mock))
+        return ToolResult(
+            "plan_asset_inspection", True, is_mock,
+            data={
+                "mode": "mission",
+                "action": "replan",
+                "mission": new_mission,
+                "plan": new_mission.get("remaining_plan"),
+            },
+        )
+
+    if action == "replan":
+        return ToolResult(
+            "plan_asset_inspection", False, input_is_mock,
+            message="当前没有活动巡检任务，不能执行“重规划当前任务”",
+        )
+
     if not detection_results:
         return ToolResult(
             "plan_asset_inspection", False, input_is_mock,
@@ -277,6 +360,40 @@ def plan_asset_inspection(
             message="检测结果格式不合法：每条记录必须包含 asset_id",
         )
 
+    if action == "create":
+        from spatial_module.mission import MissionError, create_mission
+
+        try:
+            new_mission = create_mission(
+                detection_results,
+                source_kind="detection",
+                source_label="Agent 从当前检测结果新建任务",
+                is_mock=input_is_mock,
+                source_signature=source_signature,
+                start_node=start_node or "S",
+                closed_edges=list(closed_edges or []),
+                output_dir="runs/missions",
+            )
+        except MissionError as exc:
+            return ToolResult(
+                "plan_asset_inspection", False, input_is_mock,
+                message=f"新建巡检任务失败：{exc}",
+            )
+        except Exception as exc:
+            return ToolResult(
+                "plan_asset_inspection", False, input_is_mock,
+                message=f"新建巡检任务失败（{type(exc).__name__}）：{exc}",
+            )
+        return ToolResult(
+            "plan_asset_inspection", True, input_is_mock,
+            data={
+                "mode": "mission",
+                "action": "create",
+                "mission": new_mission,
+                "plan": new_mission.get("remaining_plan"),
+            },
+        )
+
     try:
         plan = route_planner()
     except ModuleUnavailable as exc:
@@ -285,7 +402,7 @@ def plan_asset_inspection(
     try:
         result = plan(
             list(detection_results),
-            start_node=start_node,
+            start_node=start_node or "S",
             closed_edges=list(closed_edges or []),
             output_dir="runs",
         )
@@ -293,6 +410,22 @@ def plan_asset_inspection(
         return ToolResult(
             "plan_asset_inspection", False, input_is_mock,
             message=f"D 模块调用失败（{type(exc).__name__}）：{exc}",
+        )
+
+    # D 的 invalid_input 是失败，不是“规划成功但没路线”。适配层必须改成 ok=False，
+    # 否则页面会把旧路线继续当成这次结果。
+    if not isinstance(result, dict):
+        return ToolResult(
+            "plan_asset_inspection", False, input_is_mock,
+            message="D 规划返回格式不合法：应为字典",
+        )
+    if result.get("status") == "invalid_input":
+        detail = "；".join(str(n) for n in (result.get("notes") or []) if str(n).strip())
+        return ToolResult(
+            "plan_asset_inspection", False, input_is_mock,
+            data=result,
+            message="D 返回 invalid_input（输入或场景不合法）"
+            + (f"：{detail}" if detail else ""),
         )
 
     return ToolResult("plan_asset_inspection", True, input_is_mock, result)
