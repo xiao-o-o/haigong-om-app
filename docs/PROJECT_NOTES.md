@@ -362,7 +362,7 @@ python -m streamlit run app.py --server.port $PORT --server.address 0.0.0.0 --se
 | 知识库 | `knowledge/checklist.json`（5 条，public/team 分开标注） | 完成 |
 | 配置示例 | `.streamlit/secrets.toml.example` | 完成 |
 | 合并依赖 | `requirements.txt`（A/C/D 三家 + 应用层，已合并） | 完成 |
-| 部署说明 | 本 README「部署到公网」节 + `start.sh` + `runtime.txt` | 完成 |
+| 部署说明 | 本文档「部署到公网」节 + `start.sh` + `runtime.txt` | 完成 |
 | 在线链接 | 平台发布通道（见「部署到公网 · 方式一」） | v0.6 已发（含 CD-R2 巡检执行） |
 | 三组提示词及真实输出 | `docs/prompts_and_outputs.md` | 完成（LLM 决策器真实输出，含 run_id 与耗时） |
 | 日志与测试记录 | `docs/acceptance.md`、`runs/<run_id>/run_log.json` | 完成 |
