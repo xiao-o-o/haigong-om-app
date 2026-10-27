@@ -23,7 +23,7 @@
 | 8 | LLM 超时 | 假服务延迟 6 s，`LLM_TIMEOUT=3`，决策器=仅 LLM | 3.0 s 后 `【失败】LLM 请求超时（3s）`，未执行任何工具 | 通过 |
 | 8b | LLM 超时（自动） | 同上，决策器=自动 | `planner=rule_fallback`，note 写明「LLM 调用失败回退：LLM 请求超时（3s）」 | 通过 |
 | 9 | 不同会话隔离 | 两个独立 Streamlit 会话，会话 1 检测 2 台 | 会话 2 的 `detections=0`、`detect_run_id=""`，无数据串用 | 通过 |
-| 9b | 真实 LLM 决策 | 配 DeepSeek `deepseek-v4-flash`，决策器=仅 LLM，跑三组提示词 | 三组均 `planner=llm`，0.9–1.2 s 出计划；分数与路线仍由 A / D 产出 | 通过 |
+| 9b | 真实 LLM 决策 | 配 DeepSeek `deepseek-flash`，决策器=仅 LLM，跑三组提示词 | 三组均 `planner=llm`，0.9–1.2 s 出计划；分数与路线仍由 A / D 产出 | 通过 |
 | 9c | LLM 编排知识库 | 提示词 `查一下疑似异常怎么复核` | 只调 `get_checklist`，命中 K-004（复核流程）、K-002，未多调检测或规划 | 通过 |
 
 补充：会话 1 的 `run_id` 为 `20261023-090819-…`，会话 2 未产生 run_id，确认状态不共享。

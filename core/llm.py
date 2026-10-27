@@ -12,7 +12,7 @@
 配置（环境变量或 .streamlit/secrets.toml 同名键）：
     LLM_BASE_URL   https://api.deepseek.com/v1   （务必带版本段，代码只在其后拼 /chat/completions）
     LLM_API_KEY    sk-...
-    LLM_MODEL      deepseek-v4-flash              （旧名 deepseek-chat 已于 2026-07-24 停用，会 404）
+    LLM_MODEL      deepseek-flash              （旧名 deepseek-chat 已于 2026-07-24 停用，会 404）
     LLM_TIMEOUT    30                             （秒，可选）
     LLM_TEMPERATURE 0                             （可选，决策任务建议 0）
     LLM_THINKING   auto                           （可选：auto 对 deepseek 关闭思考 / 0 关 / 1 开）

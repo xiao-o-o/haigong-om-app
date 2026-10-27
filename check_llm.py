@@ -3,7 +3,7 @@
 
 用法（在项目根目录执行）：
     .venv\\Scripts\\python.exe check_llm.py
-    .venv\\Scripts\\python.exe check_llm.py --model deepseek-v4-pro
+    .venv\\Scripts\\python.exe check_llm.py --model deepseek-flash
     .venv\\Scripts\\python.exe check_llm.py --planner llm      # 强制不走回退，暴露真实错误
 
 四步检查，任一步失败都会给出排查方向，不会静默通过：
@@ -25,6 +25,7 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 from core import llm  # noqa: E402
+from core.runlog import APP_VERSION  # noqa: E402
 from agent import planner as planner_mod  # noqa: E402
 
 OK, BAD, WARN = "[通过]", "[失败]", "[提示]"
@@ -218,7 +219,7 @@ def main() -> int:
         os.environ["LLM_API_KEY"] = args.key
 
     cfg = llm.current_config()
-    print("LLM 接入自检 · 海工智维 v0.5")
+    print(f"LLM 接入自检 · 海工智维 v{APP_VERSION}")
     print(f"secrets 文件：{llm._SECRETS_FILE}（{'存在' if llm._SECRETS_FILE.exists() else '不存在'}）")
 
     if not step_config(cfg):

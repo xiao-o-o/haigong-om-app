@@ -10,7 +10,7 @@
 | 时间 | 2026-10-23 20:47（+08:00） |
 | 环境 | Windows，Python 3.13.14，`.venv` |
 | 运行模式 | `real`（真调 A 模型与 D 规划） |
-| 决策器 | `llm`（DeepSeek `deepseek-v4-flash`，OpenAI 兼容接口） |
+| 决策器 | `llm`（DeepSeek `deepseek-flash`，OpenAI 兼容接口） |
 | 音频 | `samples/P01_sample.wav`（正常）、`samples/P04_sample.wav`（异常） |
 | 采样率 | 16 kHz 单声道 WAV |
 | app_version | 0.6.0 |
@@ -34,7 +34,7 @@
 **模型决策**（原文）
 
 ```
-LLM 规划（deepseek-v4-flash）：用户只要求检测 P04 的声音，上下文中有 P04 的音频文件，
+LLM 规划（deepseek-flash）：用户只要求检测 P04 的声音，上下文中有 P04 的音频文件，
 直接调用音频检测工具即可，无需规划巡检。
 ```
 
@@ -69,7 +69,7 @@ LLM 规划（deepseek-v4-flash）：用户只要求检测 P04 的声音，上下
 **模型决策**（原文）
 
 ```
-LLM 规划（deepseek-v4-flash）：先对可用音频文件的 P01、P04 做异常检测，
+LLM 规划（deepseek-flash）：先对可用音频文件的 P01、P04 做异常检测，
 再基于检测结果在关闭 E04 的条件下规划巡检路线
 ```
 
@@ -104,7 +104,7 @@ LLM 规划（deepseek-v4-flash）：先对可用音频文件的 P01、P04 做异
 **模型决策**（原文）
 
 ```
-LLM 规划（deepseek-v4-flash）：用户询问疑似异常的复核方法，属于检查标准与资料检索，
+LLM 规划（deepseek-flash）：用户询问疑似异常的复核方法，属于检查标准与资料检索，
 应调用 get_checklist 查询相关流程。
 ```
 

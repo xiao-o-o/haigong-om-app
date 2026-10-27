@@ -239,7 +239,7 @@ plan_asset_inspection(
 
 ```toml
 LLM_BASE_URL = "https://api.deepseek.com/v1"   # 必须带版本段，代码只在其后拼 /chat/completions
-LLM_MODEL    = "deepseek-v4-flash"             # deepseek-chat 已于 2026-07-24 停用，写它必 404
+LLM_MODEL    = "deepseek-flash"             # deepseek-chat 已于 2026-07-24 停用，写它必 404
 LLM_TIMEOUT  = 30
 LLM_THINKING = "auto"                          # 对 deepseek/qwen 自动关闭思考模式
 LLM_API_KEY  = "sk-..."                        # 填真值；不要留空串占位
@@ -304,7 +304,7 @@ LLM_API_KEY  = "sk-..."                        # 填真值；不要留空串占�
 | APP_MODE | mock | mock=模拟检测数据；real=调 A 的真实模型 |
 | LLM_BASE_URL | 空 | OpenAI 兼容接口地址，需带版本段，如 `https://api.deepseek.com/v1` |
 | LLM_API_KEY | 空 | 密钥；也可写在 `.streamlit/secrets.toml` |
-| LLM_MODEL | 空 | 模型名，如 `deepseek-v4-flash`（`deepseek-chat` 已停用） |
+| LLM_MODEL | 空 | 模型名，如 `deepseek-flash`（`deepseek-chat` 已停用） |
 | LLM_TIMEOUT | 30 | 读取超时（秒）；超时即回退规则版 |
 | LLM_TEMPERATURE | 0 | 决策任务建议 0 |
 | LLM_THINKING | auto | `auto`/`1`/`0`，控制是否关闭模型的思考模式；DeepSeek V4 默认思考且思考 token 计费，`auto` 会自动关闭 |
@@ -349,7 +349,7 @@ python -m streamlit run app.py --server.port $PORT --server.address 0.0.0.0 --se
 | 配置示例 | `.streamlit/secrets.toml.example` | 完成 |
 | 合并依赖 | `requirements.txt`（A/C/D 三家 + 应用层，已合并） | 完成 |
 | 部署说明 | 本 README「部署到公网」节 + `start.sh` + `runtime.txt` | 完成 |
-| 在线链接 | 平台发布通道（见「部署到公网 · 方式一」） | v0.5 已发，v0.6 待重发 |
+| 在线链接 | 平台发布通道（见「部署到公网 · 方式一」） | v0.6 已发（含 CD-R2 巡检执行） |
 | 三组提示词及真实输出 | `docs/prompts_and_outputs.md` | 完成（LLM 决策器真实输出，含 run_id 与耗时） |
 | 日志与测试记录 | `docs/acceptance.md`、`runs/<run_id>/run_log.json` | 完成 |
 | LLM 接入自检 | `check_llm.py` | 完成 |
@@ -361,7 +361,7 @@ python -m streamlit run app.py --server.port $PORT --server.address 0.0.0.0 --se
 - [x] 合并 A（audio_module + models + samples）、C/D（spatial_module + scene）
 - [x] 工具签名按真实契约重写：`detect_assets_audio(asset_ids)`，返回 `requested_asset_ids / missing_asset_ids / results`
 - [x] 端到端链路（A→D→C）在本机跑通（mock 与 real 双模式）
-- [x] 部署公网（v0.5 已发；v0.6 改动后需重新发布）
+- [x] 部署公网（v0.6 已发，含 LLM 真实接入与巡检执行）
 - [x] Agent 决策器接入 LLM（白名单校验 + 规则版回退；未配置时只提供规则版）
 - [x] 每次运行独立 run_id + 日志脱敏落盘
 - [x] 可下载 Markdown 报告（结果 / 模拟条件 / 人工复核建议分节）
@@ -380,7 +380,7 @@ python -m streamlit run app.py --server.port $PORT --server.address 0.0.0.0 --se
 
 | 项 | 说明 |
 | --- | --- |
-| 重新发布 | v0.6 改了工具签名与配置变量名（`LLM_BASE_URL`），线上还是旧版 |
+| 发布包密钥 | 线上密钥随部署目录上传，不在仓库里；换 key 后需重新发布才对线上生效 |
 | 3.12 口径 | 团队若统一 3.12，先按 README 那条命令验模型加载，再改 `runtime.txt` |
 | 密钥外发 | 公网演示前换成限额专用 key，别用主账号那把 |
 | A 的路径要求 | A 用 `Path(audio_path).exists()` 判断，传绝对路径最稳；传相对路径会按进程 CWD 解析 |
