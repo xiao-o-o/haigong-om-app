@@ -237,7 +237,7 @@ $env:PYTHONIOENCODING = "utf-8"
 .venv\Scripts\streamlit run app.py
 ```
 
-页面打开后按 `DEMO_C1.md` 走一遍 C1，确认 0→30→80→40→受阻→恢复→70→完成。
+页面打开后按 `docs/CD_DEMO_C1.md` 走一遍 C1，确认 0→30→80→40→受阻→恢复→70→完成。
 
 ## 9. 来源与边界
 
